@@ -30,6 +30,9 @@ except Exception as e:
     app.logger.error(f"Error listing Gemini models: {e}")
 # --- END DEBUG ---
 
+# If you want to use the model immediately after confirming it works, uncomment this:
+model = genai.GenerativeModel("gemini-1.0-pro")
+
 # --- Caching for Market Prices (Global for app.py) ---
 last_market_data = None
 last_fetch_time = 0
