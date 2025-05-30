@@ -1,3 +1,4 @@
+print("--- APP.PY STARTED SUCCESSFULLY ---") # <--- NEW DEBUG LINE HERE!
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json
@@ -5,7 +6,7 @@ import os
 import datetime
 import requests
 import time
-import google.generativeai as genai # Import the Gemini library
+import google.generativeai as genai
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for all routes
