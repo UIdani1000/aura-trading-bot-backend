@@ -1,4 +1,4 @@
-print("--- APP.PY STARTED SUCCESSFULLY ---") # <--- NEW DEBUG LINE HERE!
+print("--- APP.PY STARTED SUCCESSFULLY ---")
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json
@@ -15,29 +15,25 @@ TRADES_FILE = 'trades.json'
 ANALYSIS_FILE = 'analysis_results.json'
 
 # --- Configure Gemini API Key ---
-# IMPORTANT: Set this as an environment variable in Render!
-# In Render, go to your backend service -> Environment -> Add Environment Variable
-# Key: GOOGLE_API_KEY
-# Value: YOUR_ACTUAL_GEMINI_API_KEY
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
-# --- DEBUG: List available Gemini models ---
-try:
-    app.logger.info("Attempting to list available Gemini models...")
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            app.logger.info(f"Available model: {m.name}")
-except Exception as e:
-    app.logger.error(f"Error listing Gemini models: {e}")
-# --- END DEBUG ---
+# --- REMOVED STARTUP DEBUG LOGS FOR LIST_MODELS HERE ---
+# The previous startup logs for list_models didn't appear, likely due to logger context.
+# We will now move this logic to a point where it's guaranteed to be logged on error.
+# --- END REMOVAL ---
 
-# If you want to use the model immediately after confirming it works, uncomment this:
-model = genai.GenerativeModel("gemini-1.0-pro")
+# We'll try to initialize the model here, but the real list_models debug will be in /chat
+model = None # Initialize model to None
+try:
+    model = genai.GenerativeModel("gemini-1.0-pro")
+except Exception as e:
+    app.logger.error(f"Initial attempt to load gemini-1.0-pro failed at startup: {e}")
+
 
 # --- Caching for Market Prices (Global for app.py) ---
 last_market_data = None
 last_fetch_time = 0
-CACHE_DURATION = 5 # Changed to 5 seconds
+CACHE_DURATION = 5
 
 # Ensure trades.json and analysis_results.json exist
 def init_db():
@@ -58,7 +54,7 @@ def read_trades():
         try:
             return json.load(f)
         except json.JSONDecodeError:
-            return [] # Return empty list if file is empty or corrupted
+            return []
 
 # Function to write trades to JSON file
 def write_trades(trades):
@@ -96,7 +92,7 @@ def log_trade():
             return jsonify({"error": f"Missing field: {field}"}), 400
 
     trades = read_trades()
-    new_id = len(trades) + 1 # Simple ID generation
+    new_id = len(trades) + 1
     
     trade_entry = {
         "id": new_id,
@@ -118,7 +114,6 @@ def get_trades():
     trades = read_trades()
     return jsonify(trades), 200
 
-# Endpoint to get trade summary statistics
 @app.route('/get_trade_summary', methods=['GET'])
 def get_trade_summary():
     trades = read_trades()
@@ -140,7 +135,6 @@ def get_trade_summary():
     
     return jsonify(summary), 200
 
-# Helper function to get cached market data
 def _get_cached_market_data():
     global last_market_data, last_fetch_time
 
@@ -192,7 +186,6 @@ def _get_cached_market_data():
         return {}
 
 
-# Endpoint to fetch real-time market prices from CoinGecko
 @app.route('/all_market_prices', methods=['GET'])
 def get_all_market_prices():
     market_data = _get_cached_market_data()
@@ -348,11 +341,15 @@ def chat_with_gemini():
     )
 
     try:
-        # Ensure the GOOGLE_API_KEY environment variable is set on Render!
-        # If the API key is not set or invalid, this will raise an exception.
-        # Attempting to initialize Gemini model 'gemini-1.0-pro'
-        model = genai.GenerativeModel('gemini-1.0-pro')
-        app.logger.info("Attempting to generate content with gemini-1.0-pro...") # Added this line for better logging
+        # Check if the model was initialized globally. If not, try to initialize it now.
+        global model
+        if model is None:
+            app.logger.warning("Gemini model not initialized globally. Attempting to initialize now within /chat.")
+            model = genai.GenerativeModel('gemini-1.0-pro')
+            app.logger.info("Gemini model initialized successfully within /chat.")
+
+
+        app.logger.info("Attempting to generate content with gemini-1.0-pro...")
         response = model.generate_content(full_prompt)
         gemini_response_text = response.text
         app.logger.info("Gemini content generation successful.")
@@ -360,8 +357,23 @@ def chat_with_gemini():
         return jsonify({"response": gemini_response_text}), 200
 
     except Exception as e:
-        app.logger.error(f"Error communicating with Gemini API. Exception details: {e}")
-        # Provide a more helpful error message in the frontend if API fails
+        # This is the crucial part: if model generation fails, list available models here.
+        app.logger.error(f"Error communicating with Gemini API for generateContent. Exception details: {e}")
+        try:
+            app.logger.info("Attempting to list available Gemini models due to previous error...")
+            available_models = []
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    available_models.append(m.name)
+            if available_models:
+                app.logger.info(f"Successfully listed available models: {', '.join(available_models)}")
+                # If 'gemini-1.0-pro' is NOT in this list, that's your problem.
+                # If it is, then something else is wrong with its usage.
+            else:
+                app.logger.warning("No models supporting 'generateContent' found.")
+        except Exception as list_e:
+            app.logger.error(f"Failed to list Gemini models after initial error: {list_e}")
+
         return jsonify({"error": f"Failed to get response from AI. Please check your Gemini API key and backend logs. Details: {str(e)}"}), 500
 
 if __name__ == '__main__':
