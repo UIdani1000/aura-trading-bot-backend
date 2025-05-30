@@ -20,19 +20,7 @@ ANALYSIS_FILE = 'analysis_results.json'
 # Value: YOUR_ACTUAL_GEMINI_API_KEY
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
-# --- DEBUGGING: List available Gemini models on app startup ---
-# This code will run when your Flask app starts, logging available models
-try:
-    app.logger.info("Attempting to list available Gemini models on app startup...")
-    available_models_info = []
-    for m in genai.list_models():
-        # Only list models that support text generation (generateContent)
-        if 'generateContent' in m.supported_generation_methods:
-            available_models_info.append(m.name)
-    app.logger.info(f"Available models supporting generateContent (on startup): {available_models_info}")
-except Exception as e:
-    app.logger.error(f"Error listing Gemini models on startup: {e}")
-# --- END DEBUGGING CODE ---
+# Removed the previous list_models debug block as it wasn't showing output.
 
 # --- Caching for Market Prices (Global for app.py) ---
 last_market_data = None
@@ -350,14 +338,17 @@ def chat_with_gemini():
     try:
         # Ensure the GOOGLE_API_KEY environment variable is set on Render!
         # If the API key is not set or invalid, this will raise an exception.
-        model = genai.GenerativeModel('gemini-pro') # Still try gemini-pro
+        # Attempting to initialize Gemini model 'gemini-1.0-pro'
+        model = genai.GenerativeModel('gemini-1.0-pro')
+        app.logger.info("Attempting to generate content with gemini-1.0-pro...") # Added this line for better logging
         response = model.generate_content(full_prompt)
         gemini_response_text = response.text
+        app.logger.info("Gemini content generation successful.")
 
         return jsonify({"response": gemini_response_text}), 200
 
     except Exception as e:
-        app.logger.error(f"Error communicating with Gemini API: {e}")
+        app.logger.error(f"Error communicating with Gemini API. Exception details: {e}")
         # Provide a more helpful error message in the frontend if API fails
         return jsonify({"error": f"Failed to get response from AI. Please check your Gemini API key and backend logs. Details: {str(e)}"}), 500
 
