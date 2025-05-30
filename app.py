@@ -17,17 +17,12 @@ ANALYSIS_FILE = 'analysis_results.json'
 # --- Configure Gemini API Key ---
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
-# --- REMOVED STARTUP DEBUG LOGS FOR LIST_MODELS HERE ---
-# The previous startup logs for list_models didn't appear, likely due to logger context.
-# We will now move this logic to a point where it's guaranteed to be logged on error.
-# --- END REMOVAL ---
-
 # We'll try to initialize the model here, but the real list_models debug will be in /chat
 model = None # Initialize model to None
 try:
-    model = genai.GenerativeModel("gemini-1.0-pro")
+    model = genai.GenerativeModel("gemini-pro") # <--- CHANGED MODEL NAME HERE
 except Exception as e:
-    app.logger.error(f"Initial attempt to load gemini-1.0-pro failed at startup: {e}")
+    app.logger.error(f"Initial attempt to load gemini-pro failed at startup: {e}")
 
 
 # --- Caching for Market Prices (Global for app.py) ---
@@ -345,11 +340,11 @@ def chat_with_gemini():
         global model
         if model is None:
             app.logger.warning("Gemini model not initialized globally. Attempting to initialize now within /chat.")
-            model = genai.GenerativeModel('gemini-1.0-pro')
+            model = genai.GenerativeModel('gemini-pro') # <--- CHANGED MODEL NAME HERE
             app.logger.info("Gemini model initialized successfully within /chat.")
 
 
-        app.logger.info("Attempting to generate content with gemini-1.0-pro...")
+        app.logger.info("Attempting to generate content with gemini-pro...") # Also changed this log
         response = model.generate_content(full_prompt)
         gemini_response_text = response.text
         app.logger.info("Gemini content generation successful.")
@@ -367,7 +362,7 @@ def chat_with_gemini():
                     available_models.append(m.name)
             if available_models:
                 app.logger.info(f"Successfully listed available models: {', '.join(available_models)}")
-                # If 'gemini-1.0-pro' is NOT in this list, that's your problem.
+                # If 'gemini-pro' is NOT in this list, that's your problem.
                 # If it is, then something else is wrong with its usage.
             else:
                 app.logger.warning("No models supporting 'generateContent' found.")
