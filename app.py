@@ -35,9 +35,9 @@ print("--- Finished attempting to list models at startup ---")
 
 model = None # Initialize model to None
 try:
-    model = genai.GenerativeModel("gemini-pro") # Still trying "gemini-pro" here
+    model = genai.GenerativeModel("gemini-1.5-pro") # <<< --- CHANGE THIS LINE
 except Exception as e:
-    app.logger.error(f"Initial attempt to load gemini-pro failed at startup: {e}")
+    app.logger.error(f"Initial attempt to load gemini-1.5-pro failed at startup: {e}")
 
 
 # --- Caching for Market Prices (Global for app.py) ---
@@ -355,11 +355,11 @@ def chat_with_gemini():
         global model
         if model is None:
             app.logger.warning("Gemini model not initialized globally. Attempting to initialize now within /chat.")
-            model = genai.GenerativeModel('gemini-pro') # Still trying "gemini-pro" here
+            model = genai.GenerativeModel('gemini-1.5-pro') # <<< --- CHANGE THIS LINE
             app.logger.info("Gemini model initialized successfully within /chat.")
 
 
-        app.logger.info("Attempting to generate content with gemini-pro...") # Also changed this log
+        app.logger.info("Attempting to generate content with gemini-1.5-pro...") # Also changed this log
         response = model.generate_content(full_prompt)
         gemini_response_text = response.text
         app.logger.info("Gemini content generation successful.")
