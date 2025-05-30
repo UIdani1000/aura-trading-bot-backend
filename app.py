@@ -20,6 +20,20 @@ ANALYSIS_FILE = 'analysis_results.json'
 # Value: YOUR_ACTUAL_GEMINI_API_KEY
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
+# --- DEBUGGING: List available Gemini models on app startup ---
+# This code will run when your Flask app starts, logging available models
+try:
+    app.logger.info("Attempting to list available Gemini models on app startup...")
+    available_models_info = []
+    for m in genai.list_models():
+        # Only list models that support text generation (generateContent)
+        if 'generateContent' in m.supported_generation_methods:
+            available_models_info.append(m.name)
+    app.logger.info(f"Available models supporting generateContent (on startup): {available_models_info}")
+except Exception as e:
+    app.logger.error(f"Error listing Gemini models on startup: {e}")
+# --- END DEBUGGING CODE ---
+
 # --- Caching for Market Prices (Global for app.py) ---
 last_market_data = None
 last_fetch_time = 0
@@ -334,13 +348,11 @@ def chat_with_gemini():
     )
 
     try:
-        # --- Actual Gemini API Call ---
         # Ensure the GOOGLE_API_KEY environment variable is set on Render!
         # If the API key is not set or invalid, this will raise an exception.
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-pro') # Still try gemini-pro
         response = model.generate_content(full_prompt)
         gemini_response_text = response.text
-        # --- End Actual Gemini API Call ---
 
         return jsonify({"response": gemini_response_text}), 200
 
