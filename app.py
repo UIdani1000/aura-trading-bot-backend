@@ -1,12 +1,12 @@
-print("--- APP.PY STARTED SUCCESSFULLY ---")
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import json
 import os
 import datetime
-import requests
+import json
 import time
+import requests
 import google.generativeai as genai
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for all routes
@@ -14,13 +14,28 @@ CORS(app) # Enable CORS for all routes
 TRADES_FILE = 'trades.json'
 ANALYSIS_FILE = 'analysis_results.json'
 
+print("--- APP.PY STARTED SUCCESSFULLY ---") # This line confirms the file is running
+
 # --- Configure Gemini API Key ---
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
-# We'll try to initialize the model here, but the real list_models debug will be in /chat
+# --- IMMEDIATE DEBUG: List available Gemini models at startup ---
+# This block is crucial for seeing what models are available to your Render app.
+print("--- Attempting to list available Gemini models at application startup ---")
+try:
+    startup_models = []
+    for m in genai.list_models():
+        startup_models.append(m.name)
+    print(f"--- STARTUP MODELS: {', '.join(startup_models) if startup_models else 'None found'} ---")
+except Exception as e:
+    print(f"--- ERROR LISTING MODELS AT STARTUP: {e} ---")
+print("--- Finished attempting to list models at startup ---")
+# --- END IMMEDIATE DEBUG ---
+
+
 model = None # Initialize model to None
 try:
-    model = genai.GenerativeModel("gemini-pro") # <--- CHANGED MODEL NAME HERE
+    model = genai.GenerativeModel("gemini-pro") # Still trying "gemini-pro" here
 except Exception as e:
     app.logger.error(f"Initial attempt to load gemini-pro failed at startup: {e}")
 
@@ -340,7 +355,7 @@ def chat_with_gemini():
         global model
         if model is None:
             app.logger.warning("Gemini model not initialized globally. Attempting to initialize now within /chat.")
-            model = genai.GenerativeModel('gemini-pro') # <--- CHANGED MODEL NAME HERE
+            model = genai.GenerativeModel('gemini-pro') # Still trying "gemini-pro" here
             app.logger.info("Gemini model initialized successfully within /chat.")
 
 
@@ -352,23 +367,9 @@ def chat_with_gemini():
         return jsonify({"response": gemini_response_text}), 200
 
     except Exception as e:
-        # This is the crucial part: if model generation fails, list available models here.
         app.logger.error(f"Error communicating with Gemini API for generateContent. Exception details: {e}")
-        try:
-            app.logger.info("Attempting to list available Gemini models due to previous error...")
-            available_models = []
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    available_models.append(m.name)
-            if available_models:
-                app.logger.info(f"Successfully listed available models: {', '.join(available_models)}")
-                # If 'gemini-pro' is NOT in this list, that's your problem.
-                # If it is, then something else is wrong with its usage.
-            else:
-                app.logger.warning("No models supporting 'generateContent' found.")
-        except Exception as list_e:
-            app.logger.error(f"Failed to list Gemini models after initial error: {list_e}")
-
+        # The list_models call for debugging is now primarily at startup for visibility.
+        # This block mainly catches generation errors.
         return jsonify({"error": f"Failed to get response from AI. Please check your Gemini API key and backend logs. Details: {str(e)}"}), 500
 
 if __name__ == '__main__':
