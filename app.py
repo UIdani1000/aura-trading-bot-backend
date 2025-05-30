@@ -3,13 +3,19 @@ from flask_cors import CORS
 import json
 import os
 import datetime
-import requests # Import requests for external API calls
+import requests
+import time # Import the time module for caching
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for all routes
 
 TRADES_FILE = 'trades.json'
 ANALYSIS_FILE = 'analysis_results.json' # To store analysis for persistence (optional, but good practice)
+
+# --- Caching for Market Prices ---
+last_market_data = None
+last_fetch_time = 0
+CACHE_DURATION = 30 # Cache data for 30 seconds to avoid hitting CoinGecko rate limits
 
 # Ensure trades.json and analysis_results.json exist
 def init_db():
@@ -90,7 +96,7 @@ def get_trades():
     trades = read_trades()
     return jsonify(trades), 200
 
-# NEW: Endpoint to get trade summary statistics
+# Endpoint to get trade summary statistics
 @app.route('/get_trade_summary', methods=['GET'])
 def get_trade_summary():
     trades = read_trades()
@@ -115,9 +121,15 @@ def get_trade_summary():
 # Endpoint to fetch real-time market prices from CoinGecko
 @app.route('/all_market_prices', methods=['GET'])
 def get_all_market_prices():
-    # Mapping of common crypto pairs to CoinGecko IDs
-    # Note: CoinGecko uses 'bitcoin', 'ethereum' etc. as IDs.
-    # We also need to map to USD for price comparison.
+    global last_market_data, last_fetch_time
+
+    # Check if cached data is still valid
+    if last_market_data and (time.time() - last_fetch_time < CACHE_DURATION):
+        app.logger.info("Serving market data from cache.")
+        return jsonify(last_market_data), 200
+
+    # If cache is expired or empty, fetch new data
+    app.logger.info("Fetching new market data from CoinGecko.")
     coin_ids = {
         "BTC/USD": "bitcoin",
         "ETH/USD": "ethereum",
@@ -128,39 +140,36 @@ def get_all_market_prices():
         "RVN/USD": "ravencoin" # This might not be directly available as USD pair
     }
     
-    # Construct comma-separated string of IDs for CoinGecko API
     ids_string = ",".join(coin_ids.values())
 
     try:
-        # Fetch current prices and 24h change percentages
         response = requests.get(
             f"https://api.coingecko.com/api/v3/simple/price?ids={ids_string}&vs_currencies=usd&include_24hr_change=true"
         )
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
         market_data = response.json()
         
-        # Prepare data in the desired format for frontend
         formatted_data = {}
         for pair, coin_id in coin_ids.items():
             if coin_id in market_data and 'usd' in market_data[coin_id]:
                 price = market_data[coin_id]['usd']
-                change_24h = market_data[coin_id].get('usd_24h_change', 0) # Default to 0 if not present
-
-                # For simplicity, we'll just use the raw change as 'change' and percentage as 'percent_change'
-                # A more robust solution might calculate `change` based on price difference
+                change_24h = market_data[coin_id].get('usd_24h_change', 0)
                 formatted_data[pair] = {
                     "price": price,
-                    "change": change_24h / 100 * price, # Approximate change in USD based on percent change
+                    "change": change_24h / 100 * price,
                     "percent_change": change_24h
                 }
             else:
-                # Handle cases where a coin might not be found or has no USD price
                 formatted_data[pair] = {
                     "price": 0.0,
                     "change": 0.0,
                     "percent_change": 0.0
                 }
-
+        
+        # Update cache
+        last_market_data = formatted_data
+        last_fetch_time = time.time()
+        
         return jsonify(formatted_data), 200
 
     except requests.exceptions.RequestException as e:
