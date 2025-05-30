@@ -15,7 +15,7 @@ ANALYSIS_FILE = 'analysis_results.json'
 # --- Caching for Market Prices (Global for app.py) ---
 last_market_data = None
 last_fetch_time = 0
-CACHE_DURATION = 30 # Cache data for 30 seconds
+CACHE_DURATION = 15 # Changed to 15 seconds
 
 # Ensure trades.json and analysis_results.json exist
 def init_db():
@@ -126,7 +126,6 @@ def _get_cached_market_data():
         app.logger.info("Serving market data from cache for internal use.")
         return last_market_data
 
-    # If cache is expired or empty, fetch new data (reusing logic from /all_market_prices)
     app.logger.info("Fetching new market data from CoinGecko for internal use.")
     coin_ids = {
         "BTC/USD": "bitcoin", "ETH/USD": "ethereum", "SOL/USD": "solana",
@@ -165,7 +164,7 @@ def _get_cached_market_data():
 
     except requests.exceptions.RequestException as e:
         app.logger.error(f"Error fetching market prices from CoinGecko for internal use: {e}")
-        return {} # Return empty dict on error
+        return {}
     except Exception as e:
         app.logger.error(f"An unexpected error occurred in _get_cached_market_data: {e}")
         return {}
@@ -284,6 +283,8 @@ def chat_with_gemini():
     if not user_message:
         return jsonify({"error": "No message provided"}), 400
 
+    user_message_lower = user_message.lower()
+
     # --- Fetch Live Market Data for AI Context ---
     market_prices = _get_cached_market_data()
     market_context = ""
@@ -295,8 +296,12 @@ def chat_with_gemini():
     # --- Fetch Trade Logs for AI Context ---
     trades = read_trades()
     trade_context = ""
+    total_trades = 0
+    total_profit_loss = 0
+    win_rate = 0.0
+    avg_profit_per_trade = 0.0
+
     if trades:
-        # Calculate summary statistics for the AI
         total_profit_loss = sum(trade['profit_loss'] for trade in trades)
         total_trades = len(trades)
         profitable_trades = sum(1 for trade in trades if trade['profit_loss'] > 0)
@@ -308,18 +313,13 @@ def chat_with_gemini():
         trade_context += f"- Total P/L: {total_profit_loss:.2f} USD\n"
         trade_context += f"- Win Rate: {win_rate:.2f}%\n"
         trade_context += f"- Avg. P/L per Trade: {avg_profit_per_trade:.2f} USD\n"
-        
-        # You could also include a few recent trades if needed:
-        # trade_context += "Recent Trades:\n"
-        # for trade in trades[-3:]: # Last 3 trades
-        #    trade_context += f"  - {trade['pair']} {trade['trade_type']} | P/L: {trade['profit_loss']:.2f}\n"
-
+    
     # Construct the full prompt for Gemini, including context
     full_prompt = (
         f"You are a helpful and knowledgeable AI trading assistant named {ai_name}. "
         f"Your purpose is to assist {user_name} with trading-related questions, market analysis, "
         f"and general inquiries. You now have access to live market data and {user_name}'s trading history. "
-        f"Use this context to provide more informed answers. "
+        f"Use this context to provide more informed and personalized answers. "
         f"Be concise, informative, and always encourage users to do their own research. "
         f"Do not provide financial advice or recommendations to buy/sell. "
         f"Do not act as a trading bot or execute trades. "
@@ -330,29 +330,43 @@ def chat_with_gemini():
     )
 
     try:
-        # --- Mock Gemini Response (Replace with actual Gemini API integration) ---
-        gemini_response_text = f"Hello {user_name}! I can help you with that. "
+        gemini_response_text = f"Hello {user_name}! "
 
-        if "price" in user_message.lower() or "market" in user_message.lower():
+        if "hello" in user_message_lower or "hi" in user_message_lower:
+            gemini_response_text += f"How can {ai_name} assist you today with your trading inquiries? I now have access to live market data and your trade history."
+        elif "price" in user_message_lower or "market" in user_message_lower or "current value" in user_message_lower:
             if market_prices:
-                gemini_response_text += "Based on current data, here are some recent market prices:\n"
-                # Example: respond with BTC price if asked about general price
-                if "BTC/USD" in market_prices:
-                    btc_info = market_prices["BTC/USD"]
-                    gemini_response_text += f"Bitcoin (BTC/USD) is currently at {btc_info['price']:.2f} USD, with a {btc_info['percent_change']:.2f}% change in the last 24h. "
+                specific_pair_asked = None
+                for pair in market_prices.keys():
+                    if pair.lower().replace('/usd', '') in user_message_lower:
+                        specific_pair_asked = pair
+                        break
+
+                if specific_pair_asked:
+                    info = market_prices[specific_pair_asked]
+                    gemini_response_text += f"The current price for {specific_pair_asked} is {info['price']:.2f} USD, with a {info['percent_change']:.2f}% change in the last 24 hours."
                 else:
-                    gemini_response_text += "I have access to current market data. Which specific pair are you interested in?"
+                    # Provide a general market overview if no specific pair is mentioned
+                    overview = []
+                    for pair, info in market_prices.items():
+                        overview.append(f"{pair}: {info['price']:.2f} USD ({info['percent_change']:.2f}%)")
+                    gemini_response_text += "Here's a quick market overview: " + ", ".join(overview) + ". Please specify if you'd like to know about a particular crypto asset."
             else:
-                gemini_response_text += "I'm currently unable to fetch live market data. Please check external sources."
-        elif "trade history" in user_message.lower() or "my performance" in user_message.lower():
+                gemini_response_text += "I'm currently unable to fetch live market data. Please check external sources for real-time prices."
+        
+        elif any(keyword in user_message_lower for keyword in ["trade history", "my performance", "my trades", "profit", "loss", "win rate", "how am i doing"]):
             if trades:
-                gemini_response_text += f"Based on your trading history: You have made {total_trades} trades with a total P/L of {total_profit_loss:.2f} USD and a Win Rate of {win_rate:.2f}%. Your average profit per trade is {avg_profit_per_trade:.2f} USD."
+                gemini_response_text += (
+                    f"Based on your trading history: You have completed {total_trades} trades. "
+                    f"Your total Profit/Loss is {total_profit_loss:.2f} USD, and your Win Rate stands at {win_rate:.2f}%. "
+                    f"On average, you've made {avg_profit_per_trade:.2f} USD per trade. "
+                    f"Keep up the good work!"
+                )
             else:
-                gemini_response_text += "It looks like you haven't logged any trades yet."
-        elif "hello" in user_message.lower():
-            gemini_response_text = f"Hello {user_name}! How can {ai_name} assist you today with your trading inquiries? I now have access to live market data and your trade history."
+                gemini_response_text += "It looks like you haven't logged any trades yet. Start logging trades to see your performance metrics!"
+        
         else:
-            gemini_response_text += "I can provide insights based on market data and your trading history. What specific questions do you have?"
+            gemini_response_text += "I can provide insights based on current market data or your trading history. What specific trading-related questions do you have for me?"
 
 
         return jsonify({"response": gemini_response_text}), 200
