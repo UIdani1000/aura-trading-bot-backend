@@ -4,18 +4,18 @@ import json
 import os
 import datetime
 import requests
-import time # Import the time module for caching
+import time
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for all routes
 
 TRADES_FILE = 'trades.json'
-ANALYSIS_FILE = 'analysis_results.json' # To store analysis for persistence (optional, but good practice)
+ANALYSIS_FILE = 'analysis_results.json'
 
-# --- Caching for Market Prices ---
+# --- Caching for Market Prices (Global for app.py) ---
 last_market_data = None
 last_fetch_time = 0
-CACHE_DURATION = 30 # Cache data for 30 seconds to avoid hitting CoinGecko rate limits
+CACHE_DURATION = 30 # Cache data for 30 seconds
 
 # Ensure trades.json and analysis_results.json exist
 def init_db():
@@ -118,28 +118,21 @@ def get_trade_summary():
     
     return jsonify(summary), 200
 
-# Endpoint to fetch real-time market prices from CoinGecko
-@app.route('/all_market_prices', methods=['GET'])
-def get_all_market_prices():
+# Helper function to get cached market data
+def _get_cached_market_data():
     global last_market_data, last_fetch_time
 
-    # Check if cached data is still valid
     if last_market_data and (time.time() - last_fetch_time < CACHE_DURATION):
-        app.logger.info("Serving market data from cache.")
-        return jsonify(last_market_data), 200
+        app.logger.info("Serving market data from cache for internal use.")
+        return last_market_data
 
-    # If cache is expired or empty, fetch new data
-    app.logger.info("Fetching new market data from CoinGecko.")
+    # If cache is expired or empty, fetch new data (reusing logic from /all_market_prices)
+    app.logger.info("Fetching new market data from CoinGecko for internal use.")
     coin_ids = {
-        "BTC/USD": "bitcoin",
-        "ETH/USD": "ethereum",
-        "SOL/USD": "solana",
-        "XRP/USD": "ripple",
-        "ADA/USD": "cardano",
-        "DOGE/USD": "dogecoin",
-        "RVN/USD": "ravencoin" # This might not be directly available as USD pair
+        "BTC/USD": "bitcoin", "ETH/USD": "ethereum", "SOL/USD": "solana",
+        "XRP/USD": "ripple", "ADA/USD": "cardano", "DOGE/USD": "dogecoin",
+        "RVN/USD": "ravencoin"
     }
-    
     ids_string = ",".join(coin_ids.values())
 
     try:
@@ -166,20 +159,25 @@ def get_all_market_prices():
                     "percent_change": 0.0
                 }
         
-        # Update cache
         last_market_data = formatted_data
         last_fetch_time = time.time()
-        
-        return jsonify(formatted_data), 200
+        return formatted_data
 
     except requests.exceptions.RequestException as e:
-        app.logger.error(f"Error fetching market prices from CoinGecko: {e}")
-        return jsonify({"error": "Failed to fetch market prices", "details": str(e)}), 500
+        app.logger.error(f"Error fetching market prices from CoinGecko for internal use: {e}")
+        return {} # Return empty dict on error
     except Exception as e:
-        app.logger.error(f"An unexpected error occurred in get_all_market_prices: {e}")
-        return jsonify({"error": "An internal server error occurred", "details": str(e)}), 500
+        app.logger.error(f"An unexpected error occurred in _get_cached_market_data: {e}")
+        return {}
 
-# Endpoint for AI analysis (using a mock response or integrating with an actual LLM later)
+
+# Endpoint to fetch real-time market prices from CoinGecko
+@app.route('/all_market_prices', methods=['GET'])
+def get_all_market_prices():
+    market_data = _get_cached_market_data()
+    return jsonify(market_data), 200
+
+
 @app.route('/generate_analysis', methods=['POST'])
 def generate_analysis():
     data = request.get_json()
@@ -189,37 +187,31 @@ def generate_analysis():
     trade_type = data.get('trade_type')
     balance_range = data.get('balance_range')
     leverage = data.get('leverage')
-    current_price_for_pair = data.get('current_price_for_pair', 0) # Get the current price from frontend
+    current_price_for_pair = data.get('current_price_for_pair', 0)
 
     if not all([pair, timeframes, indicators, trade_type, balance_range, leverage]):
         return jsonify({"error": "Missing analysis parameters"}), 400
 
-    # Basic mock analysis response for demonstration
-    # In a real application, you'd send this data to an LLM like Gemini
-    # or a dedicated analysis engine.
-    
-    # Generate dynamic entry/TP/SL based on current_price_for_pair
-    # These are just illustrative calculations
     if current_price_for_pair > 0:
         if trade_type == "BUY":
             signal = "BUY"
             confidence = "High"
             entry = current_price_for_pair
-            tp1 = round(current_price_for_pair * 1.005, 2) # 0.5% up
-            tp2 = round(current_price_for_pair * 1.01, 2)  # 1% up
-            tp3 = round(current_price_for_pair * 1.02, 2)  # 2% up
-            sl = round(current_price_for_pair * 0.99, 2)   # 1% down
-            rr_ratio = "1:2.0" # Example ratio
+            tp1 = round(current_price_for_pair * 1.005, 2)
+            tp2 = round(current_price_for_pair * 1.01, 2)
+            tp3 = round(current_price_for_pair * 1.02, 2)
+            sl = round(current_price_for_pair * 0.99, 2)
+            rr_ratio = "1:2.0"
         elif trade_type == "SELL":
             signal = "SELL"
             confidence = "Medium"
             entry = current_price_for_pair
-            tp1 = round(current_price_for_pair * 0.995, 2) # 0.5% down
-            tp2 = round(current_price_for_pair * 0.99, 2)  # 1% down
-            tp3 = round(current_price_for_pair * 0.98, 2)  # 2% down
-            sl = round(current_price_for_pair * 1.01, 2)   # 1% up
-            rr_ratio = "1:1.5" # Example ratio
-        else: # Scalp or Long Hold, defaulting to a neutral or general signal
+            tp1 = round(current_price_for_pair * 0.995, 2)
+            tp2 = round(current_price_for_pair * 0.99, 2)
+            tp3 = round(current_price_for_pair * 0.98, 2)
+            sl = round(current_price_for_pair * 1.01, 2)
+            rr_ratio = "1:1.5"
+        else:
             signal = "HOLD"
             confidence = "Moderate"
             entry = current_price_for_pair
@@ -228,7 +220,7 @@ def generate_analysis():
             tp3 = round(current_price_for_pair * 1.01, 2)
             sl = round(current_price_for_pair * 0.998, 2)
             rr_ratio = "1:1.0"
-    else: # Fallback if no current price is provided or it's zero
+    else:
         signal = "NEUTRAL"
         confidence = "Low (No live price)"
         entry = 0.0
@@ -261,7 +253,6 @@ def generate_analysis():
         "leverage": leverage
     }
 
-    # Store analysis result (optional, but good for history/debugging)
     analysis_results = read_analysis_results()
     new_analysis_id = len(analysis_results) + 1
     analysis_results.append({
@@ -278,7 +269,6 @@ def generate_analysis():
     })
     write_analysis_results(analysis_results)
 
-
     return jsonify({
         "ai_analysis_text": ai_analysis_text,
         "analysis_data": analysis_data
@@ -288,48 +278,87 @@ def generate_analysis():
 def chat_with_gemini():
     data = request.get_json()
     user_message = data.get('message')
-    user_name = data.get('userName', 'Trader') # Get user's name
-    ai_name = data.get('aiName', 'Aura')     # Get AI's name
+    user_name = data.get('userName', 'Trader')
+    ai_name = data.get('aiName', 'Aura')
 
     if not user_message:
         return jsonify({"error": "No message provided"}), 400
 
-    # Construct the full prompt for Gemini
-    # This example uses a very basic prompt. For a real application, you'd
-    # include conversation history and more sophisticated context.
+    # --- Fetch Live Market Data for AI Context ---
+    market_prices = _get_cached_market_data()
+    market_context = ""
+    if market_prices:
+        market_context = "Current Market Prices:\n"
+        for pair, info in market_prices.items():
+            market_context += f"- {pair}: {info['price']:.2f} USD ({info['percent_change']:.2f}% in 24h)\n"
+
+    # --- Fetch Trade Logs for AI Context ---
+    trades = read_trades()
+    trade_context = ""
+    if trades:
+        # Calculate summary statistics for the AI
+        total_profit_loss = sum(trade['profit_loss'] for trade in trades)
+        total_trades = len(trades)
+        profitable_trades = sum(1 for trade in trades if trade['profit_loss'] > 0)
+        win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0.0
+        avg_profit_per_trade = (total_profit_loss / total_trades) if total_trades > 0 else 0.0
+
+        trade_context = "\nYour Trading History Summary:\n"
+        trade_context += f"- Total Trades: {total_trades}\n"
+        trade_context += f"- Total P/L: {total_profit_loss:.2f} USD\n"
+        trade_context += f"- Win Rate: {win_rate:.2f}%\n"
+        trade_context += f"- Avg. P/L per Trade: {avg_profit_per_trade:.2f} USD\n"
+        
+        # You could also include a few recent trades if needed:
+        # trade_context += "Recent Trades:\n"
+        # for trade in trades[-3:]: # Last 3 trades
+        #    trade_context += f"  - {trade['pair']} {trade['trade_type']} | P/L: {trade['profit_loss']:.2f}\n"
+
+    # Construct the full prompt for Gemini, including context
     full_prompt = (
         f"You are a helpful and knowledgeable AI trading assistant named {ai_name}. "
         f"Your purpose is to assist {user_name} with trading-related questions, market analysis, "
-        f"and general inquiries. Be concise, informative, and always encourage users to do their own research. "
-        f"If the user asks about a price, try to give a brief, relevant market overview without guaranteeing future prices. "
+        f"and general inquiries. You now have access to live market data and {user_name}'s trading history. "
+        f"Use this context to provide more informed answers. "
+        f"Be concise, informative, and always encourage users to do their own research. "
         f"Do not provide financial advice or recommendations to buy/sell. "
         f"Do not act as a trading bot or execute trades. "
+        f"Do not make up prices or trade data if not explicitly provided.\n\n"
+        f"{market_context}\n"
+        f"{trade_context}\n"
         f"User: {user_message}"
     )
 
     try:
-        # Placeholder for Gemini API call
-        # Replace with your actual Gemini API integration
-        # Example using a hypothetical client (you would integrate your actual API key and library)
-        # from google.generativeai import GenerativeModel
-        # model = GenerativeModel('gemini-pro')
-        # response = model.generate_content(full_prompt)
-        # gemini_response_text = response.text
+        # --- Mock Gemini Response (Replace with actual Gemini API integration) ---
+        gemini_response_text = f"Hello {user_name}! I can help you with that. "
 
-        # For now, a mock response for demonstration:
-        gemini_response_text = f"Hello {user_name}! You asked: '{user_message}'. As {ai_name}, I can help you with trading concepts, market data, and analysis. What specifically would you like to know?"
-        if "hello" in user_message.lower():
-            gemini_response_text = f"Hello {user_name}! How can {ai_name} assist you today with your trading inquiries?"
-        elif "price" in user_message.lower() or "market" in user_message.lower():
-            gemini_response_text = f"The crypto market is highly volatile. For real-time prices, please check reputable exchanges. Always do your own research before making decisions."
-        elif "buy" in user_message.lower() or "sell" in user_message.lower() or "trade" in user_message.lower():
-            gemini_response_text = f"I cannot provide financial advice or execute trades. My purpose is to provide information and analysis for {user_name} to make informed decisions."
+        if "price" in user_message.lower() or "market" in user_message.lower():
+            if market_prices:
+                gemini_response_text += "Based on current data, here are some recent market prices:\n"
+                # Example: respond with BTC price if asked about general price
+                if "BTC/USD" in market_prices:
+                    btc_info = market_prices["BTC/USD"]
+                    gemini_response_text += f"Bitcoin (BTC/USD) is currently at {btc_info['price']:.2f} USD, with a {btc_info['percent_change']:.2f}% change in the last 24h. "
+                else:
+                    gemini_response_text += "I have access to current market data. Which specific pair are you interested in?"
+            else:
+                gemini_response_text += "I'm currently unable to fetch live market data. Please check external sources."
+        elif "trade history" in user_message.lower() or "my performance" in user_message.lower():
+            if trades:
+                gemini_response_text += f"Based on your trading history: You have made {total_trades} trades with a total P/L of {total_profit_loss:.2f} USD and a Win Rate of {win_rate:.2f}%. Your average profit per trade is {avg_profit_per_trade:.2f} USD."
+            else:
+                gemini_response_text += "It looks like you haven't logged any trades yet."
+        elif "hello" in user_message.lower():
+            gemini_response_text = f"Hello {user_name}! How can {ai_name} assist you today with your trading inquiries? I now have access to live market data and your trade history."
+        else:
+            gemini_response_text += "I can provide insights based on market data and your trading history. What specific questions do you have?"
 
 
         return jsonify({"response": gemini_response_text}), 200
 
     except Exception as e:
-        app.logger.error(f"Error communicating with Gemini API: {e}")
+        app.logger.error(f"Error communicating with Gemini API or processing chat: {e}")
         return jsonify({"error": f"Failed to get response from AI: {str(e)}"}), 500
 
 if __name__ == '__main__':
