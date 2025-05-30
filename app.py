@@ -20,7 +20,15 @@ ANALYSIS_FILE = 'analysis_results.json'
 # Value: YOUR_ACTUAL_GEMINI_API_KEY
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
-# Removed the previous list_models debug block as it wasn't showing output.
+# --- DEBUG: List available Gemini models ---
+try:
+    app.logger.info("Attempting to list available Gemini models...")
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            app.logger.info(f"Available model: {m.name}")
+except Exception as e:
+    app.logger.error(f"Error listing Gemini models: {e}")
+# --- END DEBUG ---
 
 # --- Caching for Market Prices (Global for app.py) ---
 last_market_data = None
