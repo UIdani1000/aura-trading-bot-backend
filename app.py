@@ -5,6 +5,7 @@ import os
 import datetime
 import requests
 import time
+import google.generativeai as genai # Import the Gemini library
 
 app = Flask(__name__)
 CORS(app) # Enable CORS for all routes
@@ -12,10 +13,17 @@ CORS(app) # Enable CORS for all routes
 TRADES_FILE = 'trades.json'
 ANALYSIS_FILE = 'analysis_results.json'
 
+# --- Configure Gemini API Key ---
+# IMPORTANT: Set this as an environment variable in Render!
+# In Render, go to your backend service -> Environment -> Add Environment Variable
+# Key: GOOGLE_API_KEY
+# Value: YOUR_ACTUAL_GEMINI_API_KEY
+genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+
 # --- Caching for Market Prices (Global for app.py) ---
 last_market_data = None
 last_fetch_time = 0
-CACHE_DURATION = 15 # Changed to 15 seconds
+CACHE_DURATION = 5 # Changed to 5 seconds
 
 # Ensure trades.json and analysis_results.json exist
 def init_db():
@@ -283,8 +291,6 @@ def chat_with_gemini():
     if not user_message:
         return jsonify({"error": "No message provided"}), 400
 
-    user_message_lower = user_message.lower()
-
     # --- Fetch Live Market Data for AI Context ---
     market_prices = _get_cached_market_data()
     market_context = ""
@@ -296,11 +302,7 @@ def chat_with_gemini():
     # --- Fetch Trade Logs for AI Context ---
     trades = read_trades()
     trade_context = ""
-    total_trades = 0
-    total_profit_loss = 0
-    win_rate = 0.0
-    avg_profit_per_trade = 0.0
-
+    
     if trades:
         total_profit_loss = sum(trade['profit_loss'] for trade in trades)
         total_trades = len(trades)
@@ -313,7 +315,7 @@ def chat_with_gemini():
         trade_context += f"- Total P/L: {total_profit_loss:.2f} USD\n"
         trade_context += f"- Win Rate: {win_rate:.2f}%\n"
         trade_context += f"- Avg. P/L per Trade: {avg_profit_per_trade:.2f} USD\n"
-    
+        
     # Construct the full prompt for Gemini, including context
     full_prompt = (
         f"You are a helpful and knowledgeable AI trading assistant named {ai_name}. "
@@ -324,56 +326,28 @@ def chat_with_gemini():
         f"Do not provide financial advice or recommendations to buy/sell. "
         f"Do not act as a trading bot or execute trades. "
         f"Do not make up prices or trade data if not explicitly provided.\n\n"
+        f"--- Context ---\n"
         f"{market_context}\n"
         f"{trade_context}\n"
+        f"--- End Context ---\n\n"
         f"User: {user_message}"
     )
 
     try:
-        gemini_response_text = f"Hello {user_name}! "
-
-        if "hello" in user_message_lower or "hi" in user_message_lower:
-            gemini_response_text += f"How can {ai_name} assist you today with your trading inquiries? I now have access to live market data and your trade history."
-        elif "price" in user_message_lower or "market" in user_message_lower or "current value" in user_message_lower:
-            if market_prices:
-                specific_pair_asked = None
-                for pair in market_prices.keys():
-                    if pair.lower().replace('/usd', '') in user_message_lower:
-                        specific_pair_asked = pair
-                        break
-
-                if specific_pair_asked:
-                    info = market_prices[specific_pair_asked]
-                    gemini_response_text += f"The current price for {specific_pair_asked} is {info['price']:.2f} USD, with a {info['percent_change']:.2f}% change in the last 24 hours."
-                else:
-                    # Provide a general market overview if no specific pair is mentioned
-                    overview = []
-                    for pair, info in market_prices.items():
-                        overview.append(f"{pair}: {info['price']:.2f} USD ({info['percent_change']:.2f}%)")
-                    gemini_response_text += "Here's a quick market overview: " + ", ".join(overview) + ". Please specify if you'd like to know about a particular crypto asset."
-            else:
-                gemini_response_text += "I'm currently unable to fetch live market data. Please check external sources for real-time prices."
-        
-        elif any(keyword in user_message_lower for keyword in ["trade history", "my performance", "my trades", "profit", "loss", "win rate", "how am i doing"]):
-            if trades:
-                gemini_response_text += (
-                    f"Based on your trading history: You have completed {total_trades} trades. "
-                    f"Your total Profit/Loss is {total_profit_loss:.2f} USD, and your Win Rate stands at {win_rate:.2f}%. "
-                    f"On average, you've made {avg_profit_per_trade:.2f} USD per trade. "
-                    f"Keep up the good work!"
-                )
-            else:
-                gemini_response_text += "It looks like you haven't logged any trades yet. Start logging trades to see your performance metrics!"
-        
-        else:
-            gemini_response_text += "I can provide insights based on current market data or your trading history. What specific trading-related questions do you have for me?"
-
+        # --- Actual Gemini API Call ---
+        # Ensure the GOOGLE_API_KEY environment variable is set on Render!
+        # If the API key is not set or invalid, this will raise an exception.
+        model = genai.GenerativeModel('gemini-pro')
+        response = model.generate_content(full_prompt)
+        gemini_response_text = response.text
+        # --- End Actual Gemini API Call ---
 
         return jsonify({"response": gemini_response_text}), 200
 
     except Exception as e:
-        app.logger.error(f"Error communicating with Gemini API or processing chat: {e}")
-        return jsonify({"error": f"Failed to get response from AI: {str(e)}"}), 500
+        app.logger.error(f"Error communicating with Gemini API: {e}")
+        # Provide a more helpful error message in the frontend if API fails
+        return jsonify({"error": f"Failed to get response from AI. Please check your Gemini API key and backend logs. Details: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000), debug=True)
