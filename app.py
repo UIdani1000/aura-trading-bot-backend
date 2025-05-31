@@ -171,8 +171,8 @@ def _get_cached_market_data():
         market_data = response.json()
         
         formatted_data = {}
-        for pair, info_id in coin_ids.items(): # Corrected: 'info' -> 'info_id'
-            if info_id in market_data and 'usd' in market_data[info_id]: # Corrected: 'coin_id' -> 'info_id'
+        for pair, info_id in coin_ids.items():
+            if info_id in market_data and 'usd' in market_data[info_id]:
                 price = market_data[info_id]['usd']
                 change_24h = market_data[info_id].get('usd_24h_change', 0)
                 formatted_data[pair] = {
@@ -193,10 +193,12 @@ def _get_cached_market_data():
 
     except requests.exceptions.RequestException as e:
         app.logger.error(f"Error fetching market prices from CoinGecko for internal use: {e}")
-        return {}
+        # IMPORTANT CHANGE: Return last known good data if new fetch fails
+        return last_market_data if last_market_data is not None else {}
     except Exception as e:
         app.logger.error(f"An unexpected error occurred in _get_cached_market_data: {e}")
-        return {}
+        # IMPORTANT CHANGE: Return last known good data if new fetch fails
+        return last_market_data if last_market_data is not None else {}
 
 
 @app.route('/all_market_prices', methods=['GET'])
@@ -318,6 +320,10 @@ def chat_with_gemini():
         market_context = "Current Market Prices:\n"
         for pair, info in market_prices.items():
             market_context += f"- {pair}: {info['price']:.2f} USD ({info['percent_change']:.2f}% in 24h)\n"
+    
+    # --- DEBUG LOGGING ---
+    app.logger.info(f"Market context sent to Gemini: '{market_context.strip()}'")
+    # --- END DEBUG LOGGING ---
 
     # --- Fetch Trade Logs for AI Context ---
     trades = read_trades()
@@ -358,12 +364,11 @@ def chat_with_gemini():
         global model
         if model is None:
             app.logger.warning("Gemini model not initialized globally. Attempting to initialize now within /chat.")
-            # --- IMPORTANT CHANGE: Using gemini-1.5-flash here too ---
             model = genai.GenerativeModel('gemini-1.5-flash')
             app.logger.info("Gemini model initialized successfully within /chat.")
 
 
-        app.logger.info("Attempting to generate content with gemini-1.5-flash...") # Changed this log as well
+        app.logger.info("Attempting to generate content with gemini-1.5-flash...")
         response = model.generate_content(full_prompt)
         gemini_response_text = response.text
         app.logger.info("Gemini content generation successful.")
@@ -372,8 +377,6 @@ def chat_with_gemini():
 
     except Exception as e:
         app.logger.error(f"Error communicating with Gemini API for generateContent. Exception details: {e}")
-        # The list_models call for debugging is now primarily at startup for visibility.
-        # This block mainly catches generation errors.
         return jsonify({"error": f"Failed to get response from AI. Please check your Gemini API key and backend logs. Details: {str(e)}"}), 500
 
 if __name__ == '__main__':
