@@ -46,7 +46,7 @@ except Exception as e:
 last_market_data = None
 last_fetch_time = 0
 # Increased cache duration to 30 seconds to reduce CoinGecko 429 errors
-CACHE_DURATION = 30 
+CACHE_DURATION = 30
 
 # Ensure trades.json and analysis_results.json exist
 def init_db():
@@ -171,10 +171,10 @@ def _get_cached_market_data():
         market_data = response.json()
         
         formatted_data = {}
-        for pair, info in coin_ids.items():
-            if coin_id in market_data and 'usd' in market_data[coin_id]:
-                price = market_data[coin_id]['usd']
-                change_24h = market_data[coin_id].get('usd_24h_change', 0)
+        for pair, info_id in coin_ids.items(): # Corrected: 'info' -> 'info_id'
+            if info_id in market_data and 'usd' in market_data[info_id]: # Corrected: 'coin_id' -> 'info_id'
+                price = market_data[info_id]['usd']
+                change_24h = market_data[info_id].get('usd_24h_change', 0)
                 formatted_data[pair] = {
                     "price": price,
                     "change": change_24h / 100 * price,
@@ -359,7 +359,7 @@ def chat_with_gemini():
         if model is None:
             app.logger.warning("Gemini model not initialized globally. Attempting to initialize now within /chat.")
             # --- IMPORTANT CHANGE: Using gemini-1.5-flash here too ---
-            model = genai.GenerativeModel('gemini-1.5-flash') 
+            model = genai.GenerativeModel('gemini-1.5-flash')
             app.logger.info("Gemini model initialized successfully within /chat.")
 
 
