@@ -26,3 +26,12 @@ pybit
 pandas
 pandas_ta
 # ... other dependencies like Flask, google-generativeai, etc.
+Flask
+Flask-Cors
+google-generativeai
+pybit
+pandas
+pandas_ta
+python-dotenv  # <--- ADD THIS LINE
+gunicorn       # <--- Make sure gunicorn is also there for Render
+requests       # <--- requests is also used, ensure it's there
