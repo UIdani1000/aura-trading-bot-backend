@@ -4,46 +4,74 @@ import json
 import time
 import requests
 import google.generativeai as genai
+import logging
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from dotenv import load_dotenv
+
+# --- NEW IMPORTS FOR BINANCE DATA & INDICATORS ---
+from binance.client import Client # type: ignore
+import pandas as pd # type: ignore
+import pandas_ta as ta # type: ignore
+# --- END NEW IMPORTS ---
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
-CORS(app) # Enable CORS for all routes
+CORS(app)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
 TRADES_FILE = 'trades.json'
 ANALYSIS_FILE = 'analysis_results.json'
 
-print("--- APP.PY STARTED SUCCESSFULLY ---") # This line confirms the file is running
+app.logger.info("--- APP.PY STARTED SUCCESSFULLY ---")
 
 # --- Configure Gemini API Key ---
-genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    app.logger.error("GOOGLE_API_KEY not found in environment variables.")
+else:
+    genai.configure(api_key=GOOGLE_API_KEY)
+
+
+# --- Configure Binance API Keys ---
+BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY')
+BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET')
+
+# Initialize Binance client (for fetching candlestick data for indicators)
+binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+app.logger.info("--- Binance client initialized ---")
+
 
 # --- IMMEDIATE DEBUG: List available Gemini models at startup ---
-# This block is crucial for seeing what models are available to your Render app.
-print("--- Attempting to list available Gemini models at application startup ---")
+app.logger.info("--- Attempting to list available Gemini models at application startup ---")
 try:
     startup_models = []
     for m in genai.list_models():
         startup_models.append(m.name)
-    print(f"--- STARTUP MODELS: {', '.join(startup_models) if startup_models else 'None found'} ---")
+    app.logger.info(f"--- STARTUP MODELS: {', '.join(startup_models) if startup_models else 'None found'} ---")
 except Exception as e:
-    print(f"--- ERROR LISTING MODELS AT STARTUP: {e} ---")
-print("--- Finished attempting to list models at startup ---")
-# --- END IMMEDIATE DEBUG ---
+    app.logger.error(f"--- ERROR LISTING MODELS AT STARTUP: {e} ---")
+app.logger.info("--- Finished attempting to list models at startup ---")
 
-
-model = None # Initialize model to None
+model = None
 try:
-    model = genai.GenerativeModel("gemini-1.5-pro") # <<< --- CHANGE THIS LINE
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    app.logger.info("--- Successfully initialized model to gemini-1.5-flash at startup ---")
 except Exception as e:
-    app.logger.error(f"Initial attempt to load gemini-1.5-pro failed at startup: {e}")
+    app.logger.error(f"Initial attempt to load gemini-1.5-flash failed at startup: {e}")
 
 
 # --- Caching for Market Prices (Global for app.py) ---
-last_market_data = None
-last_fetch_time = 0
-CACHE_DURATION = 5
+# This cache will now store data from Binance including indicators
+market_prices_cache = {}
+last_updated_time = 0
+# Dashboard cache duration: 50 seconds (slightly less than frontend's 60s fetch to ensure fresh data)
+CACHE_DURATION = 50 
 
 # Ensure trades.json and analysis_results.json exist
 def init_db():
@@ -145,65 +173,148 @@ def get_trade_summary():
     
     return jsonify(summary), 200
 
-def _get_cached_market_data():
-    global last_market_data, last_fetch_time
-
-    if last_market_data and (time.time() - last_fetch_time < CACHE_DURATION):
-        app.logger.info("Serving market data from cache for internal use.")
-        return last_market_data
-
-    app.logger.info("Fetching new market data from CoinGecko for internal use.")
-    coin_ids = {
-        "BTC/USD": "bitcoin", "ETH/USD": "ethereum", "SOL/USD": "solana",
-        "XRP/USD": "ripple", "ADA/USD": "cardano", "DOGE/USD": "dogecoin",
-        "RVN/USD": "ravencoin"
-    }
-    ids_string = ",".join(coin_ids.values())
-
+# --- NEW FUNCTION: Fetch market data with indicators from Binance ---
+def get_market_data_with_indicators(symbol: str, interval: str = '1h', limit: int = 100):
+    """
+    Fetches candlestick data from Binance and calculates RSI, MACD, Stochastic, and Volume.
+    """
     try:
-        response = requests.get(
-            f"https://api.coingecko.com/api/v3/simple/price?ids={ids_string}&vs_currencies=usd&include_24hr_change=true"
-        )
-        response.raise_for_status()
-        market_data = response.json()
-        
-        formatted_data = {}
-        for pair, coin_id in coin_ids.items():
-            if coin_id in market_data and 'usd' in market_data[coin_id]:
-                price = market_data[coin_id]['usd']
-                change_24h = market_data[coin_id].get('usd_24h_change', 0)
-                formatted_data[pair] = {
-                    "price": price,
-                    "change": change_24h / 100 * price,
-                    "percent_change": change_24h
-                }
-            else:
-                formatted_data[pair] = {
-                    "price": 0.0,
-                    "change": 0.0,
-                    "percent_change": 0.0
-                }
-        
-        last_market_data = formatted_data
-        last_fetch_time = time.time()
-        return formatted_data
+        klines = binance_client.get_klines(symbol=symbol, interval=interval, limit=limit)
 
-    except requests.exceptions.RequestException as e:
-        app.logger.error(f"Error fetching market prices from CoinGecko for internal use: {e}")
-        return {}
+        # Convert to Pandas DataFrame
+        df = pd.DataFrame(klines, columns=[
+            'open_time', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'number_of_trades',
+            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+        ])
+        df['close'] = pd.to_numeric(df['close'])
+        df['open'] = pd.to_numeric(df['open'])
+        df['high'] = pd.to_numeric(df['high'])
+        df['low'] = pd.to_numeric(df['low'])
+        df['volume'] = pd.to_numeric(df['volume'])
+        df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+
+        # Calculate indicators using pandas_ta
+        # Ensure 'close', 'high', 'low', 'open', 'volume' columns are available for indicators
+        df.ta.macd(append=True) # MACD
+        df.ta.rsi(append=True)  # RSI
+        df.ta.stoch(append=True)# Stochastic Oscillator (K & D)
+
+        # Get the latest data point
+        latest_data = df.iloc[-1]
+        previous_data = df.iloc[-2] if len(df) > 1 else None
+
+        current_price = latest_data['close']
+        previous_close_price = previous_data['close'] if previous_data is not None else current_price
+
+        # Calculate percentage change for the last period
+        percent_change = ((current_price - previous_close_price) / previous_close_price) * 100 if previous_close_price else 0
+
+        # Implement your actual ORSCR Strategy logic here
+        # This is a highly simplified example. You'll need to define your actual ORSCR logic.
+        orscr_signal = "NEUTRAL"
+        if latest_data['RSI_14'] and latest_data['RSI_14'] > 70:
+            orscr_signal = "SELL"
+        elif latest_data['RSI_14'] and latest_data['RSI_14'] < 30:
+            orscr_signal = "BUY"
+        elif latest_data['MACDh_12_26_9'] and latest_data['MACDh_12_26_9'] > 0 and previous_data is not None and previous_data['MACDh_12_26_9'] <= 0:
+            orscr_signal = "BUY" # MACD Histogram crossing above zero
+        elif latest_data['MACDh_12_26_9'] and latest_data['MACDh_12_26_9'] < 0 and previous_data is not None and previous_data['MACDh_12_26_9'] >= 0:
+            orscr_signal = "SELL" # MACD Histogram crossing below zero
+
+        return {
+            "price": current_price,
+            "percent_change": percent_change,
+            "rsi": round(latest_data['RSI_14'], 2) if 'RSI_14' in latest_data and pd.notna(latest_data['RSI_14']) else "N/A",
+            "macd": round(latest_data['MACD_12_26_9'], 2) if 'MACD_12_26_9' in latest_data and pd.notna(latest_data['MACD_12_26_9']) else "N/A",
+            "macd_histogram": round(latest_data['MACDh_12_26_9'], 2) if 'MACDh_12_26_9' in latest_data and pd.notna(latest_data['MACDh_12_26_9']) else "N/A",
+            "stoch_k": round(latest_data['STOCHk_14_3_3'], 2) if 'STOCHk_14_3_3' in latest_data and pd.notna(latest_data['STOCHk_14_3_3']) else "N/A",
+            "stoch_d": round(latest_data['STOCHd_14_3_3'], 2) if 'STOCHd_14_3_3' in latest_data and pd.notna(latest_data['STOCHd_14_3_3']) else "N/A",
+            "volume": round(latest_data['volume'], 2) if 'volume' in latest_data and pd.notna(latest_data['volume']) else "N/A",
+            "orscr_signal": orscr_signal # Your calculated signal
+        }
     except Exception as e:
-        app.logger.error(f"An unexpected error occurred in _get_cached_market_data: {e}")
-        return {}
+        app.logger.error(f"Error fetching/calculating data for {symbol}: {e}")
+        return None
 
-
+# --- MODIFIED: get_all_market_prices endpoint to use Binance and indicators ---
 @app.route('/all_market_prices', methods=['GET'])
 def get_all_market_prices():
-    market_data = _get_cached_market_data()
-    return jsonify(market_data), 200
+    """Endpoint for dashboard display, now using Binance data with indicators."""
+    global last_updated_time, market_prices_cache
+    current_time = time.time()
+
+    if current_time - last_updated_time < CACHE_DURATION and market_prices_cache:
+        app.logger.info("Serving market data from cache for dashboard.")
+        return jsonify(market_prices_cache)
+
+    app.logger.info("Fetching fresh market prices and indicators for dashboard...")
+    prices = {}
+
+    # Fetch data for BTC/USD (Binance symbol: BTCUSDT)
+    btc_data = get_market_data_with_indicators("BTCUSDT")
+    if btc_data:
+        prices["BTC/USD"] = btc_data
+    else:
+        # Fallback to mock data if API fails
+        prices["BTC/USD"] = {
+            "price": round(42000 + random.uniform(-500, 500), 2),
+            "percent_change": round(random.uniform(-3, 3), 2),
+            "rsi": round(random.uniform(30, 70), 2),
+            "macd": round(random.uniform(-500, 500), 2),
+            "macd_histogram": round(random.uniform(-100, 100), 2),
+            "stoch_k": round(random.uniform(20, 80), 2),
+            "stoch_d": round(random.uniform(20, 80), 2),
+            "volume": round(random.uniform(100000, 500000), 2),
+            "orscr_signal": random.choice(["BUY", "SELL", "NEUTRAL"])
+        }
+
+    # Fetch data for ETH/USD (Binance symbol: ETHUSDT)
+    eth_data = get_market_data_with_indicators("ETHUSDT")
+    if eth_data:
+        prices["ETH/USD"] = eth_data
+    else:
+        # Fallback to mock data if API fails
+        prices["ETH/USD"] = {
+            "price": round(2500 + random.uniform(-50, 50), 2),
+            "percent_change": round(random.uniform(-3, 3), 2),
+            "rsi": round(random.uniform(30, 70), 2),
+            "macd": round(random.uniform(-50, 50), 2),
+            "macd_histogram": round(random.uniform(-10, 10), 2),
+            "stoch_k": round(random.uniform(20, 80), 2),
+            "stoch_d": round(random.uniform(20, 80), 2),
+            "volume": round(random.uniform(50000, 200000), 2),
+            "orscr_signal": random.choice(["BUY", "SELL", "NEUTRAL"])
+        }
+
+    market_prices_cache = prices
+    last_updated_time = current_time
+    return jsonify(prices)
+
+# --- Kept _get_live_price_for_pair using CoinGecko for analysis requests ---
+def _get_live_price_for_pair(coin_gecko_id):
+    """Fetches the live price for a single coin directly from CoinGecko, bypassing cache, for analysis."""
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_gecko_id}&vs_currencies=usd&include_24hr_change=true"
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        if coin_gecko_id in data and 'usd' in data[coin_gecko_id]:
+            app.logger.info(f"Successfully fetched live price for {coin_gecko_id} from CoinGecko for analysis.")
+            return data[coin_gecko_id]['usd']
+        app.logger.warning(f"Live price data for {coin_gecko_id} not found in CoinGecko response for analysis.")
+        return 0.0
+    except requests.exceptions.RequestException as e:
+        app.logger.error(f"Error fetching LIVE price for {coin_gecko_id} from CoinGecko for analysis: {e}")
+        return 0.0
+    except Exception as e:
+        app.logger.error(f"An unexpected error occurred fetching LIVE price for {coin_gecko_id} for analysis: {e}")
+        return 0.0
 
 
 @app.route('/generate_analysis', methods=['POST'])
 def generate_analysis():
+    """Generates analysis based on live price for the requested pair (using CoinGecko for price)."""
     data = request.get_json()
     pair = data.get('pair')
     timeframes = data.get('timeframes')
@@ -211,48 +322,59 @@ def generate_analysis():
     trade_type = data.get('trade_type')
     balance_range = data.get('balance_range')
     leverage = data.get('leverage')
-    current_price_for_pair = data.get('current_price_for_pair', 0)
+    
+    # IMPORTANT CHANGE: Only map for Bitcoin and Ethereum for live fetches for analysis
+    coin_gecko_id_map = {
+        "BTC/USD": "bitcoin",
+        "ETH/USD": "ethereum"
+    }
+    coingecko_id = coin_gecko_id_map.get(pair)
+
+    live_price = 0.0
+    if coingecko_id:
+        live_price = _get_live_price_for_pair(coingecko_id)
+        if live_price == 0.0:
+            app.logger.warning(f"Could not fetch live price for {pair} for analysis. Falling back to 0.0.")
+    else:
+        app.logger.warning(f"CoinGecko ID not found for pair: {pair}. Cannot fetch live price for analysis.")
+
+    current_price_for_pair = live_price 
 
     if not all([pair, timeframes, indicators, trade_type, balance_range, leverage]):
         return jsonify({"error": "Missing analysis parameters"}), 400
+    
+    if current_price_for_pair <= 0:
+        return jsonify({"error": f"Cannot generate analysis for {pair}: Live price could not be fetched, or is invalid."}), 400
 
-    if current_price_for_pair > 0:
-        if trade_type == "BUY":
-            signal = "BUY"
-            confidence = "High"
-            entry = current_price_for_pair
-            tp1 = round(current_price_for_pair * 1.005, 2)
-            tp2 = round(current_price_for_pair * 1.01, 2)
-            tp3 = round(current_price_for_pair * 1.02, 2)
-            sl = round(current_price_for_pair * 0.99, 2)
-            rr_ratio = "1:2.0"
-        elif trade_type == "SELL":
-            signal = "SELL"
-            confidence = "Medium"
-            entry = current_price_for_pair
-            tp1 = round(current_price_for_pair * 0.995, 2)
-            tp2 = round(current_price_for_pair * 0.99, 2)
-            tp3 = round(current_price_for_pair * 0.98, 2)
-            sl = round(current_price_for_pair * 1.01, 2)
-            rr_ratio = "1:1.5"
-        else:
-            signal = "HOLD"
-            confidence = "Moderate"
-            entry = current_price_for_pair
-            tp1 = round(current_price_for_pair * 1.002, 2)
-            tp2 = round(current_price_for_pair * 1.005, 2)
-            tp3 = round(current_price_for_pair * 1.01, 2)
-            sl = round(current_price_for_pair * 0.998, 2)
-            rr_ratio = "1:1.0"
-    else:
-        signal = "NEUTRAL"
-        confidence = "Low (No live price)"
-        entry = 0.0
-        tp1 = 0.0
-        tp2 = 0.0
-        tp3 = 0.0
-        sl = 0.0
-        rr_ratio = "N/A"
+    # These are placeholder signals based on simple conditions
+    # In a real bot, this would involve complex analysis
+    if trade_type == "BUY":
+        signal = "BUY"
+        confidence = "High"
+        entry = current_price_for_pair
+        tp1 = round(current_price_for_pair * 1.005, 2)
+        tp2 = round(current_price_for_pair * 1.01, 2)
+        tp3 = round(current_price_for_pair * 1.02, 2)
+        sl = round(current_price_for_pair * 0.99, 2)
+        rr_ratio = "1:2.0"
+    elif trade_type == "SELL":
+        signal = "SELL"
+        confidence = "Medium"
+        entry = current_price_for_pair
+        tp1 = round(current_price_for_pair * 0.995, 2)
+        tp2 = round(current_price_for_pair * 0.99, 2)
+        tp3 = round(current_price_for_pair * 0.98, 2)
+        sl = round(current_price_for_pair * 1.01, 2)
+        rr_ratio = "1:1.5"
+    else: # Default to HOLD if trade_type is not BUY/SELL or invalid
+        signal = "HOLD"
+        confidence = "Moderate"
+        entry = current_price_for_pair
+        tp1 = round(current_price_for_pair * 1.002, 2)
+        tp2 = round(current_price_for_pair * 1.005, 2)
+        tp3 = round(current_price_for_pair * 1.01, 2)
+        sl = round(current_price_for_pair * 0.998, 2)
+        rr_ratio = "1:1.0"
 
 
     ai_analysis_text = (
@@ -308,13 +430,22 @@ def chat_with_gemini():
     if not user_message:
         return jsonify({"error": "No message provided"}), 400
 
-    # --- Fetch Live Market Data for AI Context ---
-    market_prices = _get_cached_market_data()
+    # --- Fetch Live Market Data for AI Context (now from dashboard cache with indicators) ---
+    market_prices = get_all_market_prices().json # This will use the new Binance data + indicators
     market_context = ""
     if market_prices:
-        market_context = "Current Market Prices:\n"
+        market_context = "Current Market Prices and Indicators:\n"
         for pair, info in market_prices.items():
-            market_context += f"- {pair}: {info['price']:.2f} USD ({info['percent_change']:.2f}% in 24h)\n"
+            market_context += (
+                f"- {pair}: {info['price']:.2f} USD ({info['percent_change']:.2f}% in 24h)\n"
+                f"  RSI: {info.get('rsi', 'N/A')}, MACD: {info.get('macd', 'N/A')}, Stoch K: {info.get('stoch_k', 'N/A')}, "
+                f"Stoch D: {info.get('stoch_d', 'N/A')}, Volume: {info.get('volume', 'N/A')}, "
+                f"ORSCR Signal: {info.get('orscr_signal', 'N/A')}\n"
+            )
+            
+    # --- DEBUG LOGGING ---
+    app.logger.info(f"Market context sent to Gemini: '{market_context.strip()}'")
+    # --- END DEBUG LOGGING ---
 
     # --- Fetch Trade Logs for AI Context ---
     trades = read_trades()
@@ -337,7 +468,7 @@ def chat_with_gemini():
     full_prompt = (
         f"You are a helpful and knowledgeable AI trading assistant named {ai_name}. "
         f"Your purpose is to assist {user_name} with trading-related questions, market analysis, "
-        f"and general inquiries. You now have access to live market data and {user_name}'s trading history. "
+        f"and general inquiries. You now have access to live market data including technical indicators and {user_name}'s trading history. "
         f"Use this context to provide more informed and personalized answers. "
         f"Be concise, informative, and always encourage users to do their own research. "
         f"Do not provide financial advice or recommendations to buy/sell. "
@@ -351,15 +482,14 @@ def chat_with_gemini():
     )
 
     try:
-        # Check if the model was initialized globally. If not, try to initialize it now.
         global model
         if model is None:
             app.logger.warning("Gemini model not initialized globally. Attempting to initialize now within /chat.")
-            model = genai.GenerativeModel('gemini-1.5-pro') # <<< --- CHANGE THIS LINE
+            model = genai.GenerativeModel('gemini-1.5-flash')
             app.logger.info("Gemini model initialized successfully within /chat.")
 
 
-        app.logger.info("Attempting to generate content with gemini-1.5-pro...") # Also changed this log
+        app.logger.info("Attempting to generate content with gemini-1.5-flash...")
         response = model.generate_content(full_prompt)
         gemini_response_text = response.text
         app.logger.info("Gemini content generation successful.")
@@ -368,9 +498,13 @@ def chat_with_gemini():
 
     except Exception as e:
         app.logger.error(f"Error communicating with Gemini API for generateContent. Exception details: {e}")
-        # The list_models call for debugging is now primarily at startup for visibility.
-        # This block mainly catches generation errors.
         return jsonify({"error": f"Failed to get response from AI. Please check your Gemini API key and backend logs. Details: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000), debug=True)
+    # For local development, you can set dummy API keys
+    if not BINANCE_API_KEY:
+        os.environ['BINANCE_API_KEY'] = 'YOUR_BINANCE_API_KEY' # Replace with actual key for local testing
+    if not BINANCE_API_SECRET:
+        os.environ['BINANCE_API_SECRET'] = 'YOUR_BINANCE_API_SECRET' # Replace with actual secret for local testing
+
+    app.run(host='0.0.0.0', port=os.environ.get('PORT', 10000), debug=False)
