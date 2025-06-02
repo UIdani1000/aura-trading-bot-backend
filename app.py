@@ -58,20 +58,12 @@ except Exception as e:
     app.logger.error(f"--- ERROR LISTING MODELS AT STARTUP: {e} ---")
 app.logger.info("--- Finished attempting to list models at startup ---")
 
-model = None
+model = None # Initialize model to None
 try:
- HEAD
     model = genai.GenerativeModel("gemini-1.5-flash")
     app.logger.info("--- Successfully initialized model to gemini-1.5-flash at startup ---")
-
-    # --- IMPORTANT CHANGE: Using gemini-1.5-flash now ---
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    print("--- Successfully initialized model to gemini-1.5-flash at startup ---")
- 83585c9c02c56cf767234a8b28cd9add0124928d
 except Exception as e:
     app.logger.error(f"Initial attempt to load gemini-1.5-flash failed at startup: {e}")
-
-
 # --- Caching for Market Prices (Global for app.py) ---
  HEAD
 # This cache will now store data from Binance including indicators
