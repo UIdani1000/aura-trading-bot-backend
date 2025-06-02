@@ -60,18 +60,31 @@ app.logger.info("--- Finished attempting to list models at startup ---")
 
 model = None
 try:
+<<<<<<< HEAD
     model = genai.GenerativeModel("gemini-1.5-flash")
     app.logger.info("--- Successfully initialized model to gemini-1.5-flash at startup ---")
+=======
+    # --- IMPORTANT CHANGE: Using gemini-1.5-flash now ---
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    print("--- Successfully initialized model to gemini-1.5-flash at startup ---")
+>>>>>>> 83585c9c02c56cf767234a8b28cd9add0124928d
 except Exception as e:
     app.logger.error(f"Initial attempt to load gemini-1.5-flash failed at startup: {e}")
 
 
 # --- Caching for Market Prices (Global for app.py) ---
+<<<<<<< HEAD
 # This cache will now store data from Binance including indicators
 market_prices_cache = {}
 last_updated_time = 0
 # Dashboard cache duration: 50 seconds (slightly less than frontend's 60s fetch to ensure fresh data)
 CACHE_DURATION = 50 
+=======
+last_market_data = None
+last_fetch_time = 0
+# Increased cache duration to 30 seconds to reduce CoinGecko 429 errors
+CACHE_DURATION = 30
+>>>>>>> 83585c9c02c56cf767234a8b28cd9add0124928d
 
 # Ensure trades.json and analysis_results.json exist
 def init_db():
@@ -179,6 +192,7 @@ def get_market_data_with_indicators(symbol: str, interval: str = '1h', limit: in
     Fetches candlestick data from Binance and calculates RSI, MACD, Stochastic, and Volume.
     """
     try:
+<<<<<<< HEAD
         klines = binance_client.get_klines(symbol=symbol, interval=interval, limit=limit)
 
         # Convert to Pandas DataFrame
@@ -236,6 +250,44 @@ def get_market_data_with_indicators(symbol: str, interval: str = '1h', limit: in
     except Exception as e:
         app.logger.error(f"Error fetching/calculating data for {symbol}: {e}")
         return None
+=======
+        response = requests.get(
+            f"https://api.coingecko.com/api/v3/simple/price?ids={ids_string}&vs_currencies=usd&include_24hr_change=true"
+        )
+        response.raise_for_status()
+        market_data = response.json()
+        
+        formatted_data = {}
+        for pair, info_id in coin_ids.items():
+            if info_id in market_data and 'usd' in market_data[info_id]:
+                price = market_data[info_id]['usd']
+                change_24h = market_data[info_id].get('usd_24h_change', 0)
+                formatted_data[pair] = {
+                    "price": price,
+                    "change": change_24h / 100 * price,
+                    "percent_change": change_24h
+                }
+            else:
+                formatted_data[pair] = {
+                    "price": 0.0,
+                    "change": 0.0,
+                    "percent_change": 0.0
+                }
+        
+        last_market_data = formatted_data
+        last_fetch_time = time.time()
+        return formatted_data
+
+    except requests.exceptions.RequestException as e:
+        app.logger.error(f"Error fetching market prices from CoinGecko for internal use: {e}")
+        # IMPORTANT CHANGE: Return last known good data if new fetch fails
+        return last_market_data if last_market_data is not None else {}
+    except Exception as e:
+        app.logger.error(f"An unexpected error occurred in _get_cached_market_data: {e}")
+        # IMPORTANT CHANGE: Return last known good data if new fetch fails
+        return last_market_data if last_market_data is not None else {}
+
+>>>>>>> 83585c9c02c56cf767234a8b28cd9add0124928d
 
 # --- MODIFIED: get_all_market_prices endpoint to use Binance and indicators ---
 @app.route('/all_market_prices', methods=['GET'])
@@ -436,6 +488,7 @@ def chat_with_gemini():
     if market_prices:
         market_context = "Current Market Prices and Indicators:\n"
         for pair, info in market_prices.items():
+HEAD
             market_context += (
                 f"- {pair}: {info['price']:.2f} USD ({info['percent_change']:.2f}% in 24h)\n"
                 f"  RSI: {info.get('rsi', 'N/A')}, MACD: {info.get('macd', 'N/A')}, Stoch K: {info.get('stoch_k', 'N/A')}, "
@@ -443,6 +496,10 @@ def chat_with_gemini():
                 f"ORSCR Signal: {info.get('orscr_signal', 'N/A')}\n"
             )
             
+
+            market_context += f"- {pair}: {info['price']:.2f} USD ({info['percent_change']:.2f}% in 24h)\n"
+    
+ 83585c9c02c56cf767234a8b28cd9add0124928d
     # --- DEBUG LOGGING ---
     app.logger.info(f"Market context sent to Gemini: '{market_context.strip()}'")
     # --- END DEBUG LOGGING ---
