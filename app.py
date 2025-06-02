@@ -60,31 +60,31 @@ app.logger.info("--- Finished attempting to list models at startup ---")
 
 model = None
 try:
-<<<<<<< HEAD
+ HEAD
     model = genai.GenerativeModel("gemini-1.5-flash")
     app.logger.info("--- Successfully initialized model to gemini-1.5-flash at startup ---")
-=======
+
     # --- IMPORTANT CHANGE: Using gemini-1.5-flash now ---
     model = genai.GenerativeModel("gemini-1.5-flash")
     print("--- Successfully initialized model to gemini-1.5-flash at startup ---")
->>>>>>> 83585c9c02c56cf767234a8b28cd9add0124928d
+ 83585c9c02c56cf767234a8b28cd9add0124928d
 except Exception as e:
     app.logger.error(f"Initial attempt to load gemini-1.5-flash failed at startup: {e}")
 
 
 # --- Caching for Market Prices (Global for app.py) ---
-<<<<<<< HEAD
+ HEAD
 # This cache will now store data from Binance including indicators
 market_prices_cache = {}
 last_updated_time = 0
 # Dashboard cache duration: 50 seconds (slightly less than frontend's 60s fetch to ensure fresh data)
 CACHE_DURATION = 50 
-=======
+
 last_market_data = None
 last_fetch_time = 0
 # Increased cache duration to 30 seconds to reduce CoinGecko 429 errors
 CACHE_DURATION = 30
->>>>>>> 83585c9c02c56cf767234a8b28cd9add0124928d
+ 83585c9c02c56cf767234a8b28cd9add0124928d
 
 # Ensure trades.json and analysis_results.json exist
 def init_db():
@@ -192,7 +192,7 @@ def get_market_data_with_indicators(symbol: str, interval: str = '1h', limit: in
     Fetches candlestick data from Binance and calculates RSI, MACD, Stochastic, and Volume.
     """
     try:
-<<<<<<< HEAD
+ HEAD
         klines = binance_client.get_klines(symbol=symbol, interval=interval, limit=limit)
 
         # Convert to Pandas DataFrame
@@ -250,7 +250,7 @@ def get_market_data_with_indicators(symbol: str, interval: str = '1h', limit: in
     except Exception as e:
         app.logger.error(f"Error fetching/calculating data for {symbol}: {e}")
         return None
-=======
+
         response = requests.get(
             f"https://api.coingecko.com/api/v3/simple/price?ids={ids_string}&vs_currencies=usd&include_24hr_change=true"
         )
@@ -287,7 +287,7 @@ def get_market_data_with_indicators(symbol: str, interval: str = '1h', limit: in
         # IMPORTANT CHANGE: Return last known good data if new fetch fails
         return last_market_data if last_market_data is not None else {}
 
->>>>>>> 83585c9c02c56cf767234a8b28cd9add0124928d
+ 83585c9c02c56cf767234a8b28cd9add0124928d
 
 # --- MODIFIED: get_all_market_prices endpoint to use Binance and indicators ---
 @app.route('/all_market_prices', methods=['GET'])
