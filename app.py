@@ -82,8 +82,8 @@ def get_all_market_prices():
                 limit=500 # Increased limit to ensure enough data for indicators
             )
             kline_data = kline_response.get('result', {}).get('list', [])
-            print(f"Raw kline_data for {symbol} (first 5 and last 5): {kline_data[:5]} ... {kline_data[-5:]}")
-            print(f"Number of kline entries for {symbol}: {len(kline_data)}")
+            # print(f"Raw kline_data for {symbol} (first 5 and last 5): {kline_data[:5]} ... {kline_data[-5:]}")
+            # print(f"Number of kline entries for {symbol}: {len(kline_data)}")
 
             if kline_data and len(kline_data) >= 2: # Need at least 2 candles for percent change
                 # Convert to DataFrame
@@ -105,7 +105,7 @@ def get_all_market_prices():
                 df.ta.macd(append=True) # Adds 'MACD_12_26_9', 'MACDH_12_26_9', 'MACDS_12_26_9'
                 df.ta.stoch(append=True) # Adds 'STOCHk_14_3_3', 'STOCHd_14_3_3'
 
-                print(f"DataFrame Tail for {symbol} (after indicator calculation, should be newest data):\n{df.tail()}")
+                # print(f"DataFrame Tail for {symbol} (after indicator calculation, should be newest data):\n{df.tail()}")
 
                 orscr_signal = "NEUTRAL"
                 # Access indicators using their pandas_ta generated names from the most recent candle (iloc[-1])
@@ -314,9 +314,11 @@ def apply_ormcr_logic(analysis_data):
     tp2_price = "N/A"
     risk_in_points = "N/A"
     position_size_suggestion = "User to calculate"
+    
+    calculated_confidence_score = 50 # Base confidence
+    calculated_signal_strength = "NEUTRAL"
 
     # Sort timeframes from highest to lowest for top-down analysis
-    # Use a custom sort key for timedelta if needed, but for string keys, direct comparison works if they are consistent
     sorted_timeframes = sorted(analysis_data.keys(), key=lambda x: int(BYBIT_INTERVAL_MAP.get(x, {"interval": "0"}).get("interval")) if BYBIT_INTERVAL_MAP[x]["interval"].isdigit() else 999999, reverse=True)
 
     print(f"\n--- Starting ORMCR Logic ---")
@@ -330,24 +332,20 @@ def apply_ormcr_logic(analysis_data):
             print(f"  {tf}: No data for analysis.")
             continue
 
-        # Get values from the most recent candle (iloc[-1] after reversing)
         last_close = get_indicator_value(df, 'close')
         ema9 = get_indicator_value(df, 'EMA_9')
         rsi = get_indicator_value(df, 'RSI_14')
         macd_hist = get_indicator_value(df, 'MACDH_12_26_9')
 
         tf_trend = "Neutral"
-        # Ensure enough data points for consistent trend check (at least 2 candles)
-        # Check for numeric values before comparison
         if len(df) >= 2 and isinstance(ema9, (int, float)) and isinstance(last_close, (int, float)) and 'EMA_9' in df.columns:
-            # Get previous EMA and close values safely (iloc[-2] for previous)
             prev_ema9 = df['EMA_9'].iloc[-2] if not pd.isna(df['EMA_9'].iloc[-2]) else np.nan
             prev_close = df['close'].iloc[-2] if not pd.isna(df['close'].iloc[-2]) else np.nan
 
             if not pd.isna(prev_ema9) and not pd.isna(prev_close):
-                if last_close > ema9 and prev_close > prev_ema9: # Both current and previous candle above EMA
+                if last_close > ema9 and prev_close > prev_ema9:
                     tf_trend = "Uptrend"
-                elif last_close < ema9 and prev_close < prev_ema9: # Both current and previous candle below EMA
+                elif last_close < ema9 and prev_close < prev_ema9:
                     tf_trend = "Downtrend"
         
         trend_analysis[tf] = {
@@ -359,12 +357,12 @@ def apply_ormcr_logic(analysis_data):
         }
         print(f"  {tf} Trend Analysis: {trend_analysis[tf]}")
     
-    # Determine overall bias from higher timeframes (prioritizing H4, then H1)
-    for tf in ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]: # Ordered by priority
+    # Determine overall bias from higher timeframes (prioritizing D1, then H4, H1)
+    for tf in ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]:
         if tf in trend_analysis and trend_analysis[tf]["trend"] != "Neutral":
-            overall_bias = trend_analysis[tf]["trend"].upper() # Convert "Uptrend" to "BULLISH"
+            overall_bias = trend_analysis[tf]["trend"].upper()
             print(f"  Overall Bias determined from {tf}: {overall_bias}")
-            break # Take the highest timeframe's clear trend
+            break
     print(f"Final Overall Bias: {overall_bias}")
 
     # Confirmation (focus on lowest timeframe for entry)
@@ -373,100 +371,149 @@ def apply_ormcr_logic(analysis_data):
 
     if lowest_tf and lowest_tf in analysis_data and not analysis_data[lowest_tf]['df'].empty:
         df_lowest = analysis_data[lowest_tf]['df']
-        last_close_lowest = get_indicator_value(df_lowest, 'close') # Get most recent
-        prev_close_lowest = df_lowest['close'].iloc[-2] if len(df_lowest) > 1 and not pd.isna(df_lowest['close'].iloc[-2]) else np.nan # Get previous
+        last_close_lowest = get_indicator_value(df_lowest, 'close')
+        prev_close_lowest = df_lowest['close'].iloc[-2] if len(df_lowest) > 1 and not pd.isna(df_lowest['close'].iloc[-2]) else np.nan
 
-        # Get indicator values for lowest timeframe from the most recent candle (iloc[-1])
         ema9_lowest = get_indicator_value(df_lowest, 'EMA_9')
         rsi_lowest = get_indicator_value(df_lowest, 'RSI_14')
         macd_lowest = get_indicator_value(df_lowest, 'MACD_12_26_9')
         macds_lowest = get_indicator_value(df_lowest, 'MACDS_12_26_9')
-        stoch_k_lowest = get_indicator_value(df_lowest, 'STOCHk_14_3_3') # Added for more robust check
+        stoch_k_lowest = get_indicator_value(df_lowest, 'STOCHk_14_3_3')
+        stoch_d_lowest = get_indicator_value(df_lowest, 'STOCHd_14_3_3') # Added Stochastic D
 
         print(f"  Lowest TF ({lowest_tf}) Indicator Values:")
         print(f"    Last Close: {last_close_lowest}, Prev Close: {prev_close_lowest}")
         print(f"    EMA9: {ema9_lowest}, RSI: {rsi_lowest}")
-        print(f"    MACD: {macd_lowest}, MACDS: {macds_lowest}, STOCH_K: {stoch_k_lowest}")
+        print(f"    MACD: {macd_lowest}, MACDS: {macds_lowest}, STOCH_K: {stoch_k_lowest}, STOCH_D: {stoch_d_lowest}")
 
-        # Check for numeric values before comparison
-        # Ensure all required indicators are numeric and not "N/A"
-        required_indicators = [last_close_lowest, prev_close_lowest, ema9_lowest, rsi_lowest, macd_lowest, macds_lowest, stoch_k_lowest]
+        required_indicators = {
+            'Last Close': last_close_lowest,
+            'Prev Close': prev_close_lowest,
+            'EMA9': ema9_lowest,
+            'RSI': rsi_lowest,
+            'MACD': macd_lowest,
+            'MACDS': macds_lowest,
+            'STOCHk': stoch_k_lowest,
+            'STOCHd': stoch_d_lowest # Include STOCHd in check
+        }
         
-        # Check for which indicators are 'N/A' to provide a more specific reason
-        missing_indicators = [
-            name for name, val in zip(['Last Close', 'Prev Close', 'EMA9', 'RSI', 'MACD', 'MACDS', 'STOCH_K'], required_indicators)
-            if val == "N/A" or pd.isna(val)
-        ]
+        missing_indicators = [name for name, val in required_indicators.items() if val == "N/A" or pd.isna(val)]
 
         if missing_indicators:
             confirmation_reason = f"Insufficient numeric data for lowest timeframe confirmation. Missing or NaN indicators: {', '.join(missing_indicators)}."
-            print(f"  Confirmation Reason: {confirmation_reason}")
+            calculated_confidence_score = 30 # Low confidence if key indicators are missing
         else:
-            # Simple confirmation logic (needs to be expanded for full ORMCR)
-            if overall_bias == "BULLISH":
-                # Strong bullish candle (mock: price increased significantly)
-                if last_close_lowest > prev_close_lowest * 1.001:
-                    if last_close_lowest > ema9_lowest: # Price above EMA
-                        if rsi_lowest > 50: # RSI bullish
-                            if macd_lowest > macds_lowest: # MACD bullish cross
-                                if stoch_k_lowest > 20 and stoch_k_lowest < 80: # Stochastic not overbought/oversold
-                                    confirmation_status = "STRONG CONFIRMATION"
-                                    confirmation_reason = "Strong bullish candle, price above EMA, RSI > 50, MACD bullish crossover, Stochastic in mid-range."
-                                    entry_suggestion = "ENTER NOW"
-                                    # Mock SL/TP based on a simple percentage of current price
-                                    sl_price = round(last_close_lowest * 0.995, 2) # 0.5% SL
-                                    tp1_price = round(last_close_lowest * 1.01, 2) # 1% TP1
-                                    tp2_price = round(last_close_lowest * 1.02, 2) # 2% TP2
-                                    risk_in_points = round(last_close_lowest - sl_price, 2)
-                                    position_size_suggestion = "2.5% of balance (example)"
-                                else:
-                                    confirmation_reason = "Stochastic not in optimal range for BUY."
-                            else:
-                                confirmation_reason = "Missing MACD confirmation for BUY."
-                        else:
-                            confirmation_reason = "Missing RSI confirmation for BUY."
-                    else:
-                        confirmation_reason = "Price not above EMA for BUY."
-                else:
-                    confirmation_reason = "No strong bullish candle for BUY confirmation."
-            elif overall_bias == "BEARISH":
-                # Strong bearish candle (mock: price decreased significantly)
-                if last_close_lowest < prev_close_lowest * 0.999:
-                    if last_close_lowest < ema9_lowest: # Price below EMA
-                        if rsi_lowest < 50: # RSI bearish
-                            if macd_lowest < macds_lowest: # MACD bearish cross
-                                if stoch_k_lowest > 20 and stoch_k_lowest < 80: # Stochastic not overbought/oversold
-                                    confirmation_status = "STRONG CONFIRMATION"
-                                    confirmation_reason = "Strong bearish candle, price below EMA, RSI < 50, MACD bearish crossover, Stochastic in mid-range."
-                                    entry_suggestion = "ENTER NOW"
-                                    # Mock SL/TP based on a simple percentage of current price
-                                    sl_price = round(last_close_lowest * 1.005, 2) # 0.5% SL
-                                    tp1_price = round(last_close_lowest * 0.99, 2) # 1% TP1
-                                    tp2_price = round(last_close_lowest * 0.98, 2) # 2% TP2
-                                    risk_in_points = round(sl_price - last_close_lowest, 2)
-                                    position_size_suggestion = "2.5% of balance (example)"
-                                else:
-                                    confirmation_reason = "Stochastic not in optimal range for SELL."
-                            else:
-                                confirmation_reason = "Missing MACD confirmation for SELL."
-                        else:
-                            confirmation_reason = "Missing RSI confirmation for SELL."
-                    else:
-                        confirmation_reason = "Price not below EMA for SELL."
-                else:
-                    confirmation_reason = "No strong bearish candle for SELL confirmation."
+            # Initialize conditions met counter
+            conditions_met = 0
+            total_conditions = 5 # Price action, EMA, RSI, MACD, Stochastic
+
+            # Condition 1: Price Action (Strong Candle)
+            if overall_bias == "BULLISH" and last_close_lowest > prev_close_lowest * 1.001:
+                conditions_met += 1
+                confirmation_reason = "Strong bullish candle detected."
+            elif overall_bias == "BEARISH" and last_close_lowest < prev_close_lowest * 0.999:
+                conditions_met += 1
+                confirmation_reason = "Strong bearish candle detected."
             else:
-                confirmation_reason = "Overall bias is neutral, no strong entry signal."
+                confirmation_reason = "No strong directional candle for lowest timeframe."
+
+            # Condition 2: Price vs. EMA9
+            if overall_bias == "BULLISH" and last_close_lowest > ema9_lowest:
+                conditions_met += 1
+                confirmation_reason += " Price above EMA9."
+            elif overall_bias == "BEARISH" and last_close_lowest < ema9_lowest:
+                conditions_met += 1
+                confirmation_reason += " Price below EMA9."
+            else:
+                confirmation_reason += " Price not aligned with EMA9."
+
+            # Condition 3: RSI
+            if overall_bias == "BULLISH" and rsi_lowest > 50:
+                conditions_met += 1
+                confirmation_reason += " RSI is bullish (>50)."
+            elif overall_bias == "BEARISH" and rsi_lowest < 50:
+                conditions_met += 1
+                confirmation_reason += " RSI is bearish (<50)."
+            else:
+                confirmation_reason += " RSI is neutral (40-60)."
+
+            # Condition 4: MACD Crossover
+            if overall_bias == "BULLISH" and macd_lowest > macds_lowest:
+                conditions_met += 1
+                confirmation_reason += " MACD shows bullish crossover."
+            elif overall_bias == "BEARISH" and macd_lowest < macds_lowest:
+                conditions_met += 1
+                confirmation_reason += " MACD shows bearish crossover."
+            else:
+                confirmation_reason += " MACD is not confirming direction."
+
+            # Condition 5: Stochastic Oscillator (not overbought/oversold)
+            if stoch_k_lowest > 20 and stoch_k_lowest < 80: # General mid-range for confirmation
+                conditions_met += 1
+                confirmation_reason += " Stochastic is in mid-range (20-80)."
+            else:
+                confirmation_reason += " Stochastic is in overbought/oversold zone."
+
+            # Calculate confidence based on met conditions
+            calculated_confidence_score = int((conditions_met / total_conditions) * 100)
+            if calculated_confidence_score < 40: # Prevent very low scores from being 'BUY' or 'SELL'
+                calculated_signal_strength = "NEUTRAL"
+            elif overall_bias == "BULLISH":
+                if calculated_confidence_score >= 80:
+                    calculated_signal_strength = "STRONG BUY"
+                    entry_suggestion = "ENTER NOW"
+                elif calculated_confidence_score >= 60:
+                    calculated_signal_strength = "BUY"
+                    entry_suggestion = "ENTER NOW"
+                else:
+                    calculated_signal_strength = "MONITOR"
+            elif overall_bias == "BEARISH":
+                if calculated_confidence_score >= 80:
+                    calculated_signal_strength = "STRONG SELL"
+                    entry_suggestion = "ENTER NOW"
+                elif calculated_confidence_score >= 60:
+                    calculated_signal_strength = "SELL"
+                    entry_suggestion = "ENTER NOW"
+                else:
+                    calculated_signal_strength = "MONITOR"
+            else: # Overall bias is neutral
+                calculated_signal_strength = "NEUTRAL"
+                entry_suggestion = "MONITOR"
+
+            # Set confirmation status based on entry suggestion
+            if entry_suggestion == "ENTER NOW":
+                confirmation_status = "STRONG CONFIRMATION"
+                # Mock SL/TP based on a simple percentage of current price if confirmed
+                if overall_bias == "BULLISH":
+                    sl_price = round(last_close_lowest * 0.995, 2) # 0.5% SL
+                    tp1_price = round(last_close_lowest * 1.01, 2) # 1% TP1
+                    tp2_price = round(last_close_lowest * 1.02, 2) # 2% TP2
+                    risk_in_points = round(last_close_lowest - sl_price, 2)
+                elif overall_bias == "BEARISH":
+                    sl_price = round(last_close_lowest * 1.005, 2) # 0.5% SL
+                    tp1_price = round(last_close_lowest * 0.99, 2) # 1% TP1
+                    tp2_price = round(last_close_lowest * 0.98, 2) # 2% TP2
+                    risk_in_points = round(sl_price - last_close_lowest, 2)
+                position_size_suggestion = "2.5% of balance (example)" # Placeholder
+            else:
+                confirmation_status = "PENDING"
+                sl_price = "N/A"
+                tp1_price = "N/A"
+                tp2_price = "N/A"
+                risk_in_points = "N/A"
+                position_size_suggestion = "User to calculate"
+            
+            print(f"  Conditions Met: {conditions_met}/{total_conditions}")
+            print(f"  Calculated Confidence Score: {calculated_confidence_score}%")
+            print(f"  Calculated Signal Strength: {calculated_signal_strength}")
             print(f"  Confirmation Status: {confirmation_status}, Reason: {confirmation_reason}")
     else:
         confirmation_reason = "Not enough data for lowest timeframe confirmation or lowest timeframe not selected."
+        calculated_confidence_score = 30 # Low confidence if no lowest TF data
         print(f"  Confirmation Reason: {confirmation_reason}")
         
-    if entry_suggestion == "MONITOR": # If not confirmed, set to PENDING
-        confirmation_status = "PENDING"
-        
     print(f"--- ORMCR Logic Finished ---")
-    print(f"Final ORMCR Results: Overall Bias={overall_bias}, Confirmation Status={confirmation_status}, Reason={confirmation_reason}")
+    print(f"Final ORMCR Results: Overall Bias={overall_bias}, Confirmation Status={confirmation_status}, Reason={confirmation_reason}, Confidence={calculated_confidence_score}, Signal={calculated_signal_strength}")
 
     return {
         "overall_bias": overall_bias,
@@ -476,8 +523,10 @@ def apply_ormcr_logic(analysis_data):
         "sl_price": sl_price,
         "tp1_price": tp1_price,
         "tp2_price": tp2_price,
-        "risk_in_points": risk_in_points, # Ensure this is a number or "N/A"
+        "risk_in_points": risk_in_points,
         "position_size_suggestion": position_size_suggestion,
+        "calculated_confidence_score": calculated_confidence_score, # New
+        "calculated_signal_strength": calculated_signal_strength,   # New
         "trend_analysis_by_tf": {tf: {k: v for k, v in data.items() if k != 'df'} for tf, data in analysis_data.items()} # Exclude DataFrame
     }
 
@@ -522,10 +571,10 @@ def run_ormcr_analysis():
         df_with_indicators = calculate_indicators_for_df(df, indicators)
         
         # Debugging prints for analysis dataframes
-        print(f"\n--- DataFrame for {tf} after indicator calculation (Head) ---")
-        print(df_with_indicators.head()) # Head will be oldest data
-        print(f"\n--- DataFrame for {tf} after indicator calculation (Tail) ---")
-        print(df_with_indicators.tail()) # Tail will be newest data
+        # print(f"\n--- DataFrame for {tf} after indicator calculation (Head) ---")
+        # print(df_with_indicators.head()) # Head will be oldest data
+        # print(f"\n--- DataFrame for {tf} after indicator calculation (Tail) ---")
+        # print(df_with_indicators.tail()) # Tail will be newest data
 
         # Ensure last_price and volume are floats and handle potential NaNs
         # Use iloc[-1] because DataFrame is now oldest to newest
@@ -618,7 +667,10 @@ def run_ormcr_analysis():
             "next_step_for_user": "What the user should do next (e.g., 'Monitor for confirmation', 'Proceed with the trade', 'Review other timeframes')."
         }
         """,
-        "\nIf 'ormcr_confirmation_status' is 'PENDING', ensure 'entry_type' is 'WAIT' and 'recommended_action' is 'MONITOR', and explain why in 'market_summary' and 'next_step_for_user'. Also, if 'ormcr_confirmation_status' is 'PENDING', provide 'N/A' for SL/TP prices and percentages.",
+        "\n**IMPORTANT:**",
+        f"- The 'confidence_score' should be '{ormcr_results['calculated_confidence_score']}%' based on the backend's calculation.",
+        f"- The 'signal_strength' should be '{ormcr_results['calculated_signal_strength']}' based on the backend's calculation.",
+        f"- If 'ormcr_confirmation_status' is 'PENDING', ensure 'entry_type' is 'WAIT' and 'recommended_action' is 'MONITOR', and explain why in 'market_summary' and 'next_step_for_user'. Also, if 'ormcr_confirmation_status' is 'PENDING', provide 'N/A' for SL/TP prices and percentages.",
         "\n**IMPORTANT: Maintain a friendly, conversational, and encouraging tone throughout your response. Use simple, clear language and feel free to include relevant emojis to enhance friendliness (e.g., 😊📈).**"
     ]
 
@@ -699,4 +751,3 @@ def run_ormcr_analysis():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=os.environ.get('PORT', 10000), debug=False)
- 
