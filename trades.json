@@ -1,1 +1,16 @@
-[]
+[
+    {
+        "date": "2025-06-03",
+        "time": "16:59",
+        "currency_pair": "BTC/USD",
+        "trade_type": "Buy",
+        "entry_price": 106500,
+        "exit_price": 106800,
+        "quantity": 0.01,
+        "profit_loss": 10,
+        "strategy_used": "ORSCr Strategy",
+        "notes": "A good trade",
+        "id": 1,
+        "timestamp": "2025-06-03T16:59:31.679277"
+    }
+]

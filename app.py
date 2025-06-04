@@ -1,571 +1,701 @@
 import os
-import datetime
-import json
-import time
-import requests
-import google.generativeai as genai
-import logging
-import random
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
-
-# --- NEW IMPORTS FOR BYBIT DATA & INDICATORS ---
-from pybit.unified_trading import HTTP # Bybit's unified trading API client
+from pybit.unified_trading import HTTP
 import pandas as pd
 import pandas_ta as ta
-# --- END NEW IMPORTS ---
+from datetime import datetime, timedelta
+import random
+import json # Import json for structured responses
+import numpy as np # Import numpy to handle NaN values
+import time # Import time for delays
+import traceback # Import traceback for detailed error logging
 
 # Load environment variables from .env file
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app) # Enable CORS for all routes
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-
-TRADES_FILE = 'trades.json'
-ANALYSIS_FILE = 'analysis_results.json'
-
-app.logger.info("--- APP.PY STARTED SUCCESSFULLY ---")
-
-# --- Configure Google AI (Gemini model) API Key ---
-# This key is for google.generativeai (the AI model).
-# Remember to set 'GOOGLE_API_KEY' in Render environment variables with your AI key.
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    app.logger.error("GOOGLE_API_KEY not found in environment variables. Gemini AI model will not be initialized.")
-else:
-    genai.configure(api_key=GOOGLE_API_KEY)
-    app.logger.info("Google AI API Key loaded and genai configured.")
-
-
-# --- Configure Bybit API Keys ---
-# Make sure to set BYBIT_API_KEY and BYBIT_API_SECRET in your environment variables
+# --- Configuration ---
 BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY')
 BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET')
+GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY') # Ensure this matches your .env
 
 # Initialize Bybit client
-# Bybit's unified trading API is recommended. For analysis, it generally needs API key even for public data endpoints
-# or you can instantiate it without keys if you only access public endpoints which often don't require auth.
-# However, using keys for public data can sometimes grant higher rate limits.
-try:
+if BYBIT_API_KEY and BYBIT_API_SECRET:
     bybit_client = HTTP(
         api_key=BYBIT_API_KEY,
-        api_secret=BYBIT_API_SECRET
+        api_secret=BYBIT_API_SECRET,
+        testnet=False, # Set to True for testnet
+        timeout=30 # Increased timeout to 30 seconds
     )
-    app.logger.info("--- Bybit client initialized ---")
-except Exception as e:
-    app.logger.error(f"Failed to initialize Bybit client: {e}. Ensure API keys are set correctly.")
-    # Exit or handle error appropriately if client is critical for startup
-    bybit_client = None # Set to None if initialization fails
+    print("--- Bybit client initialized ---")
+else:
+    bybit_client = None
+    print("--- Bybit API keys not found. Bybit client not initialized. ---")
 
-
-# --- IMMEDIATE DEBUG: List available Gemini models at startup ---
-app.logger.info("--- Attempting to list available Gemini models at application startup ---")
+# Initialize Google Gemini
 try:
-    # Only try to list models if GOOGLE_API_KEY was successfully loaded and configured
-    if GOOGLE_API_KEY:
-        startup_models = []
-        for m in genai.list_models():
-            startup_models.append(m.name)
-        app.logger.info(f"--- STARTUP MODELS: {', '.join(startup_models) if startup_models else 'None found'} ---")
-    else:
-        app.logger.warning("GOOGLE_API_KEY not set, skipping Gemini model listing.")
+    import google.generativeai as genai
+    genai.configure(api_key=GOOGLE_API_KEY)
+    gemini_model = genai.GenerativeModel('gemini-2.0-flash') # Using gemini-2.0-flash
+    print("--- Successfully initialized model to gemini-2.0-flash at startup ---")
 except Exception as e:
-    app.logger.error(f"--- ERROR LISTING MODELS AT STARTUP: {e} ---")
-app.logger.info("--- Finished attempting to list models at startup ---")
+    gemini_model = None
+    print(f"--- Failed to initialize Gemini model: {e} ---")
 
-model = None # Initialize model to None
-try:
-    # Only attempt to load model if GOOGLE_API_KEY is available
-    if GOOGLE_API_KEY:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        app.logger.info("--- Successfully initialized model to gemini-1.5-flash at startup ---")
-    else:
-        app.logger.warning("GOOGLE_API_KEY not set, skipping Gemini AI model initialization.")
-except Exception as e:
-    app.logger.error(f"Initial attempt to load gemini-1.5-flash failed at startup: {e}")
+# --- Helper Functions ---
 
-# --- Caching for Market Prices (Global for app.py) ---
-# This cache will now store data from Bybit including indicators
-market_prices_cache = {}
-last_updated_time = 0
-# Dashboard cache duration: 50 seconds (slightly less than frontend's 60s fetch to ensure fresh data)
-CACHE_DURATION = 50
-
-# Ensure trades.json and analysis_results.json exist
-def init_db():
-    if not os.path.exists(TRADES_FILE):
-        with open(TRADES_FILE, 'w') as f:
-            json.dump([], f)
-    if not os.path.exists(ANALYSIS_FILE):
-        with open(ANALYSIS_FILE, 'w') as f:
-            json.dump([], f)
-
-init_db()
-
-# Function to read trades from JSON file
-def read_trades():
-    if not os.path.exists(TRADES_FILE):
-        return []
-    with open(TRADES_FILE, 'r') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return []
-
-# Function to write trades to JSON file
-def write_trades(trades):
-    with open(TRADES_FILE, 'w') as f:
-        json.dump(trades, f, indent=4)
-
-# Function to read analysis results
-def read_analysis_results():
-    if not os.path.exists(ANALYSIS_FILE):
-        return []
-    with open(ANALYSIS_FILE, 'r') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return []
-
-# Function to write analysis results
-def write_analysis_results(results):
-    with open(ANALYSIS_FILE, 'w') as f:
-        json.dump(results, f, indent=4)
-
-@app.route('/')
-def home():
-    return "Aura Trading Bot Backend is running!"
-
-@app.route('/log_trade', methods=['POST'])
-def log_trade():
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "Invalid JSON"}), 400
-
-    required_fields = ['pair', 'trade_type', 'entry_price', 'exit_price', 'profit_loss']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({"error": f"Missing field: {field}"}), 400
-
-    trades = read_trades()
-    new_id = len(trades) + 1
-
-    trade_entry = {
-        "id": new_id,
-        "pair": data['pair'],
-        "trade_type": data['trade_type'],
-        "entry_price": data['entry_price'],
-        "exit_price": data['exit_price'],
-        "profit_loss": data['profit_loss'],
-        "timestamp": datetime.datetime.now().isoformat()
-    }
-
-    trades.append(trade_entry)
-    write_trades(trades)
-
-    return jsonify({"message": "Trade logged successfully!", "trade": trade_entry}), 201
-
-@app.route('/get_trades', methods=['GET'])
-def get_trades():
-    trades = read_trades()
-    return jsonify(trades), 200
-
-@app.route('/get_trade_summary', methods=['GET'])
-def get_trade_summary():
-    trades = read_trades()
-
-    total_profit_loss = sum(trade['profit_loss'] for trade in trades)
-    total_trades = len(trades)
-
-    profitable_trades = sum(1 for trade in trades if trade['profit_loss'] > 0)
-    win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0.0
-
-    average_profit_per_trade = (total_profit_loss / total_trades) if total_trades > 0 else 0.0
-
-    summary = {
-        "total_profit_loss": total_profit_loss,
-        "total_trades": total_trades,
-        "win_rate": win_rate,
-        "average_profit_per_trade": average_profit_per_trade
-    }
-
-    return jsonify(summary), 200
-
-# --- MODIFIED FUNCTION: Fetch market data with indicators from Bybit ---
-def get_market_data_with_indicators(symbol: str, category: str = 'spot', interval: str = '60', limit: int = 100):
+def get_indicator_value(df, indicator_name, default_val="N/A"):
     """
-    Fetches candlestick data from Bybit and calculates RSI, MACD, Stochastic, and Volume.
-    Intervals: '1', '3', '5', '15', '30', '60', '120', '240', '360', '720', 'D', 'W', 'M'
-    '60' corresponds to 1 hour.
-    Category: 'spot', 'linear', 'inverse'
+    Helper to safely get the most recent non-NaN indicator value from the DataFrame.
+    Assumes DataFrame is ordered oldest to newest (iloc[-1] is most recent).
     """
-    if bybit_client is None:
-        app.logger.error("Bybit client not initialized. Cannot fetch market data.")
-        return None
+    if indicator_name in df.columns:
+        # Drop NaN values and get the last (most recent) valid value
+        valid_values = df[indicator_name].dropna()
+        if not valid_values.empty:
+            return round(float(valid_values.iloc[-1]), 2) # Use iloc[-1] as DataFrame is oldest to newest
+    return default_val
 
-    try:
-        # Use get_kline for candlestick data
-        response = bybit_client.get_kline(
-            category=category,
-            symbol=symbol,
-            interval=interval,
-            limit=limit
-        )
-
-        klines = response.get('result', {}).get('list', [])
-        if not klines:
-            app.logger.warning(f"No kline data found for {symbol} from Bybit. Response: {response}")
-            return None
-
-        # Bybit klines are ordered from newest to oldest by default, reverse to oldest to newest for pandas_ta
-        klines.reverse()
-
-        # Convert to Pandas DataFrame
-        # Bybit kline format: [timestamp, open, high, low, close, volume]
-        df = pd.DataFrame(klines, columns=[
-            'start_time', 'open', 'high', 'low', 'close', 'volume',
-            'turnover' # Additional field present in unified trading klines
-        ])
-        
-        # Convert string values to numeric
-        df['open'] = pd.to_numeric(df['open'])
-        df['high'] = pd.to_numeric(df['high'])
-        df['low'] = pd.to_numeric(df['low'])
-        df['close'] = pd.to_numeric(df['close'])
-        df['volume'] = pd.to_numeric(df['volume'])
-        df['start_time'] = pd.to_datetime(df['start_time'], unit='ms') # Timestamp is in milliseconds
-
-        # Calculate indicators using pandas_ta
-        df.ta.macd(append=True) # MACD
-        df.ta.rsi(append=True)  # RSI
-        df.ta.stoch(append=True)# Stochastic Oscillator (K & D)
-
-        # Get the latest data point
-        latest_data = df.iloc[-1]
-        previous_data = df.iloc[-2] if len(df) > 1 else None
-
-        current_price = latest_data['close']
-        previous_close_price = previous_data['close'] if previous_data is not None else current_price
-
-        # Calculate percentage change for the last period
-        percent_change = ((current_price - previous_close_price) / previous_close_price) * 100 if previous_close_price else 0
-
-        # Implement your actual ORSCR Strategy logic here
-        # This is a highly simplified example. You'll need to define your actual ORSCR logic.
-        orscr_signal = "NEUTRAL"
-        if 'RSI_14' in latest_data and pd.notna(latest_data['RSI_14']):
-            if latest_data['RSI_14'] > 70:
-                orscr_signal = "SELL"
-            elif latest_data['RSI_14'] < 30:
-                orscr_signal = "BUY"
-        
-        if 'MACDh_12_26_9' in latest_data and pd.notna(latest_data['MACDh_12_26_9']):
-            if previous_data is not None and 'MACDh_12_26_9' in previous_data and pd.notna(previous_data['MACDh_12_26_9']):
-                if latest_data['MACDh_12_26_9'] > 0 and previous_data['MACDh_12_26_9'] <= 0:
-                    orscr_signal = "BUY" # MACD Histogram crossing above zero
-                elif latest_data['MACDh_12_26_9'] < 0 and previous_data['MACDh_12_26_9'] >= 0:
-                    orscr_signal = "SELL" # MACD Histogram crossing below zero
-
-        return {
-            "price": current_price,
-            "percent_change": percent_change,
-            "rsi": round(latest_data['RSI_14'], 2) if 'RSI_14' in latest_data and pd.notna(latest_data['RSI_14']) else "N/A",
-            "macd": round(latest_data['MACD_12_26_9'], 2) if 'MACD_12_26_9' in latest_data and pd.notna(latest_data['MACD_12_26_9']) else "N/A",
-            "macd_histogram": round(latest_data['MACDh_12_26_9'], 2) if 'MACDh_12_26_9' in latest_data and pd.notna(latest_data['MACDh_12_26_9']) else "N/A",
-            "stoch_k": round(latest_data['STOCHk_14_3_3'], 2) if 'STOCHk_14_3_3' in latest_data and pd.notna(latest_data['STOCHk_14_3_3']) else "N/A",
-            "stoch_d": round(latest_data['STOCHd_14_3_3'], 2) if 'STOCHd_14_3_3' in latest_data and pd.notna(latest_data['STOCHd_14_3_3']) else "N/A",
-            "volume": round(latest_data['volume'], 2) if 'volume' in latest_data and pd.notna(latest_data['volume']) else "N/A",
-            "orscr_signal": orscr_signal # Your calculated signal
-        }
-    except Exception as e:
-        app.logger.error(f"Error fetching/calculating data for {symbol} from Bybit: {e}")
-        return None
-
-
-# --- MODIFIED: get_all_market_prices endpoint to use Bybit and indicators ---
+# Function to fetch live market data (for dashboard)
 @app.route('/all_market_prices', methods=['GET'])
 def get_all_market_prices():
-    """Endpoint for dashboard display, now using Bybit data with indicators."""
-    global last_updated_time, market_prices_cache
-    current_time = time.time()
+    if not bybit_client:
+        print("Error: Bybit client not initialized in get_all_market_prices.")
+        return jsonify({"error": "Bybit client not initialized"}), 500
 
-    if current_time - last_updated_time < CACHE_DURATION and market_prices_cache:
-        app.logger.info("Serving market data from cache for dashboard.")
-        return jsonify(market_prices_cache)
+    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT"]
+    market_data = {}
 
-    app.logger.info("Fetching fresh market prices and indicators for dashboard from Bybit...")
-    prices = {}
+    for symbol in symbols:
+        print(f"\n--- Fetching daily kline data for {symbol} ---")
+        try:
+            # Fetch kline data for 1-day interval to get OHLCV for indicator calculation
+            # Bybit kline data is ordered from newest to oldest.
+            kline_response = bybit_client.get_kline(
+                category="spot",
+                symbol=symbol,
+                interval="D", # Daily interval for general market overview
+                limit=500 # Increased limit to ensure enough data for indicators
+            )
+            kline_data = kline_response.get('result', {}).get('list', [])
+            print(f"Raw kline_data for {symbol} (first 5 and last 5): {kline_data[:5]} ... {kline_data[-5:]}")
+            print(f"Number of kline entries for {symbol}: {len(kline_data)}")
 
-    # Fetch data for BTC/USD (Bybit symbol: BTCUSDT, category: linear or spot)
-    # Using 'linear' for USDT perpetuals which is common for bots, change to 'spot' if needed
-    btc_data = get_market_data_with_indicators("BTCUSDT", category='linear')
-    if btc_data:
-        prices["BTC/USD"] = btc_data
-    else:
-        # Fallback to mock data if API fails
-        app.logger.warning("Failed to fetch BTCUSDT from Bybit, falling back to mock data.")
-        prices["BTC/USD"] = {
-            "price": round(42000 + random.uniform(-500, 500), 2),
-            "percent_change": round(random.uniform(-3, 3), 2),
-            "rsi": round(random.uniform(30, 70), 2),
-            "macd": round(random.uniform(-500, 500), 2),
-            "macd_histogram": round(random.uniform(-100, 100), 2),
-            "stoch_k": round(random.uniform(20, 80), 2),
-            "stoch_d": round(random.uniform(20, 80), 2),
-            "volume": round(random.uniform(100000, 500000), 2),
-            "orscr_signal": random.choice(["BUY", "SELL", "NEUTRAL"])
-        }
+            if kline_data and len(kline_data) >= 2: # Need at least 2 candles for percent change
+                # Convert to DataFrame
+                df = pd.DataFrame(kline_data, columns=['start', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+                df['close'] = pd.to_numeric(df['close'])
+                df['volume'] = pd.to_numeric(df['volume'])
+                df['start'] = pd.to_datetime(df['start'], unit='ms') # Convert start to datetime
+                df.set_index('start', inplace=True) # Set index to datetime
+                df = df.iloc[::-1] # CRITICAL FIX: Reverse DataFrame to be OLDEST TO NEWEST
 
-    # Fetch data for ETH/USD (Bybit symbol: ETHUSDT, category: linear or spot)
-    eth_data = get_market_data_with_indicators("ETHUSDT", category='linear')
-    if eth_data:
-        prices["ETH/USD"] = eth_data
-    else:
-        # Fallback to mock data if API fails
-        app.logger.warning("Failed to fetch ETHUSDT from Bybit, falling back to mock data.")
-        prices["ETH/USD"] = {
-            "price": round(2500 + random.uniform(-50, 50), 2),
-            "percent_change": round(random.uniform(-3, 3), 2),
-            "rsi": round(random.uniform(30, 70), 2),
-            "macd": round(random.uniform(-50, 50), 2),
-            "macd_histogram": round(random.uniform(-10, 10), 2),
-            "stoch_k": round(random.uniform(20, 80), 2),
-            "stoch_d": round(random.uniform(20, 80), 2),
-            "volume": round(random.uniform(50000, 200000), 2),
-            "orscr_signal": random.choice(["BUY", "SELL", "NEUTRAL"])
-        }
+                # Now, last_close is df['close'].iloc[-1] (most recent)
+                last_close = df['close'].iloc[-1]
+                # Previous day's close is df['close'].iloc[-2]
+                prev_close = df['close'].iloc[-2] if len(df) > 1 else last_close
+                percent_change = ((last_close - prev_close) / prev_close) * 100 if prev_close != 0 else 0
 
-    market_prices_cache = prices
-    last_updated_time = current_time
-    return jsonify(prices)
+                # Calculate indicators using pandas_ta, which adds specific column names
+                df.ta.rsi(append=True) # Adds 'RSI_14'
+                df.ta.macd(append=True) # Adds 'MACD_12_26_9', 'MACDH_12_26_9', 'MACDS_12_26_9'
+                df.ta.stoch(append=True) # Adds 'STOCHk_14_3_3', 'STOCHd_14_3_3'
 
-# --- Kept _get_live_price_for_pair using CoinGecko for analysis requests ---
-# This function remains unchanged as it explicitly fetches from CoinGecko.
-def _get_live_price_for_pair(coin_gecko_id):
-    """Fetches the live price for a single coin directly from CoinGecko, bypassing cache, for analysis."""
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_gecko_id}&vs_currencies=usd&include_24hr_change=true"
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        if coin_gecko_id in data and 'usd' in data[coin_gecko_id]:
-            app.logger.info(f"Successfully fetched live price for {coin_gecko_id} from CoinGecko for analysis.")
-            return data[coin_gecko_id]['usd']
-        app.logger.warning(f"Live price data for {coin_gecko_id} not found in CoinGecko response for analysis.")
-        return 0.0
-    except requests.exceptions.RequestException as e:
-        app.logger.error(f"Error fetching LIVE price for {coin_gecko_id} from CoinGecko for analysis: {e}")
-        return 0.0
-    except Exception as e:
-        app.logger.error(f"An unexpected error occurred fetching LIVE price for {coin_gecko_id} for analysis: {e}")
-        return 0.0
+                print(f"DataFrame Tail for {symbol} (after indicator calculation, should be newest data):\n{df.tail()}")
 
+                orscr_signal = "NEUTRAL"
+                # Access indicators using their pandas_ta generated names from the most recent candle (iloc[-1])
+                rsi_val = get_indicator_value(df, 'RSI_14', default_val="N/A")
+                macd_val = get_indicator_value(df, 'MACD_12_26_9', default_val="N/A")
+                macds_val = get_indicator_value(df, 'MACDS_12_26_9', default_val="N/A")
+                stoch_k_val = get_indicator_value(df, 'STOCHk_14_3_3', default_val="N/A")
 
-@app.route('/generate_analysis', methods=['POST'])
-def generate_analysis():
-    """Generates analysis based on live price for the requested pair (using CoinGecko for price)."""
-    data = request.get_json()
-    pair = data.get('pair')
-    timeframes = data.get('timeframes')
-    indicators = data.get('indicators')
-    trade_type = data.get('trade_type')
-    balance_range = data.get('balance_range')
-    leverage = data.get('leverage')
+                # Check if indicators are numeric before applying ORSCR logic
+                if isinstance(rsi_val, (int, float)) and isinstance(macd_val, (int, float)) and isinstance(macds_val, (int, float)):
+                    if rsi_val > 60 and macd_val > macds_val:
+                        orscr_signal = "BUY"
+                    elif rsi_val < 40 and macd_val < macds_val:
+                        orscr_signal = "SELL"
+                else:
+                    orscr_signal = "N/A (Indicators not available for ORSCR logic)"
 
-    # IMPORTANT CHANGE: Only map for Bitcoin and Ethereum for live fetches for analysis
-    coin_gecko_id_map = {
-        "BTC/USD": "bitcoin",
-        "ETH/USD": "ethereum"
-    }
-    coingecko_id = coin_gecko_id_map.get(pair)
+                market_data[symbol] = {
+                    "price": round(float(last_close), 2),
+                    "percent_change": round(float(percent_change), 2),
+                    "rsi": rsi_val, # Use the safely retrieved value
+                    "macd": macd_val, # Use the safely retrieved value
+                    "stoch_k": stoch_k_val, # Use the safely retrieved value
+                    "volume": round(float(df['volume'].iloc[-1]), 2), # Use iloc[-1] for newest volume
+                    "orscr_signal": orscr_signal
+                }
+                print(f"Final market_data[{symbol}]: {market_data[symbol]}")
+            else:
+                print(f"Insufficient kline data for {symbol} to calculate full market details.")
+                market_data[symbol] = {
+                    "price": "N/A", "percent_change": "N/A", "rsi": "N/A",
+                    "macd": "N/A", "stoch_k": "N/A", "volume": "N/A", "orscr_signal": "N/A"
+                }
 
-    live_price = 0.0
-    if coingecko_id:
-        live_price = _get_live_price_for_pair(coingecko_id)
-        if live_price == 0.0:
-            app.logger.warning(f"Could not fetch live price for {pair} for analysis. Falling back to 0.0.")
-    else:
-        app.logger.warning(f"CoinGecko ID not found for pair: {pair}. Cannot fetch live price for analysis.")
+        except Exception as e:
+            print(f"Error fetching or processing data for {symbol}: {e}")
+            traceback.print_exc() # Print full traceback
+            market_data[symbol] = {
+                "price": "N/A", "percent_change": "N/A", "rsi": "N/A",
+                "macd": "N/A", "stoch_k": "N/A", "volume": "N/A", "orscr_signal": "N/A"
+            }
+        
+        time.sleep(0.5) # Add a small delay between API calls
 
-    current_price_for_pair = live_price
+    return jsonify(market_data)
 
-    if not all([pair, timeframes, indicators, trade_type, balance_range, leverage]):
-        return jsonify({"error": "Missing analysis parameters"}), 400
-
-    if current_price_for_pair <= 0:
-        return jsonify({"error": f"Cannot generate analysis for {pair}: Live price could not be fetched, or is invalid."}), 400
-
-    # These are placeholder signals based on simple conditions
-    # In a real bot, this would involve complex analysis
-    if trade_type == "BUY":
-        signal = "BUY"
-        confidence = "High"
-        entry = current_price_for_pair
-        tp1 = round(current_price_for_pair * 1.005, 2)
-        tp2 = round(current_price_for_pair * 1.01, 2)
-        tp3 = round(current_price_for_pair * 1.02, 2)
-        sl = round(current_price_for_pair * 0.99, 2)
-        rr_ratio = "1:2.0"
-    elif trade_type == "SELL":
-        signal = "SELL"
-        confidence = "Medium"
-        entry = current_price_for_pair
-        tp1 = round(current_price_for_pair * 0.995, 2)
-        tp2 = round(current_price_for_pair * 0.99, 2)
-        tp3 = round(current_price_for_pair * 0.98, 2)
-        sl = round(current_price_for_pair * 1.01, 2)
-        rr_ratio = "1:1.5"
-    else: # Default to HOLD if trade_type is not BUY/SELL or invalid
-        signal = "HOLD"
-        confidence = "Moderate"
-        entry = current_price_for_pair
-        tp1 = round(current_price_for_pair * 1.002, 2)
-        tp2 = round(current_price_for_pair * 1.005, 2)
-        tp3 = round(current_price_for_pair * 1.01, 2)
-        sl = round(current_price_for_pair * 0.998, 2)
-        rr_ratio = "1:1.0"
-
-
-    ai_analysis_text = (
-        f"Based on your request for {pair} across {', '.join(timeframes)} timeframes, "
-        f"utilizing {', '.join(indicators)} indicators, and considering a '{trade_type}' trade style "
-        f"with a balance range of '{balance_range}' and '{leverage}' leverage, "
-        f"Aura suggests a **{signal}** opportunity. "
-        f"The current market conditions indicate {signal} with a {confidence} confidence level. "
-        f"Monitor price action around key support/resistance levels. "
-        f"Always conduct your own research before making trading decisions."
-    )
-
-    analysis_data = {
-        "signal": signal,
-        "confidence": f"{confidence} Confidence",
-        "entry": entry,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "sl": sl,
-        "rr_ratio": rr_ratio,
-        "leverage": leverage
-    }
-
-    analysis_results = read_analysis_results()
-    new_analysis_id = len(analysis_results) + 1
-    analysis_results.append({
-        "id": new_analysis_id,
-        "timestamp": datetime.datetime.now().isoformat(),
-        "pair": pair,
-        "timeframes": timeframes,
-        "indicators": indicators,
-        "trade_type": trade_type,
-        "balance_range": balance_range,
-        "leverage": leverage,
-        "ai_analysis_text": ai_analysis_text,
-        "analysis_data": analysis_data
-    })
-    write_analysis_results(analysis_results)
-
-    return jsonify({
-        "ai_analysis_text": ai_analysis_text,
-        "analysis_data": analysis_data
-    }), 200
-
+# --- Chat Endpoint (Existing) ---
 @app.route('/chat', methods=['POST'])
-def chat_with_gemini():
-    data = request.get_json()
-    user_message = data.get('message')
-    user_name = data.get('userName', 'Trader')
-    ai_name = data.get('aiName', 'Aura')
+def chat():
+    if not gemini_model:
+        return jsonify({"error": "Gemini model not initialized"}), 500
 
+    user_message = request.json.get('message')
     if not user_message:
         return jsonify({"error": "No message provided"}), 400
 
-    # --- Fetch Live Market Data for AI Context (now from dashboard cache with indicators) ---
-    market_prices = get_all_market_prices().json # This will use the new Bybit data + indicators
-    market_context = ""
-    if market_prices:
-        market_context = "Current Market Prices and Indicators:\n"
-        for pair, info in market_prices.items():
-            market_context += (
-                f"- {pair}: {info['price']:.2f} USD ({info['percent_change']:.2f}% in 24h)\n"
-                f"  RSI: {info.get('rsi', 'N/A')}, MACD: {info.get('macd', 'N/A')}, Stoch K: {info.get('stoch_k', 'N/A')}, "
-                f"Stoch D: {info.get('stoch_d', 'N/A')}, Volume: {info.get('volume', 'N/A')}, "
-                f"ORSCR Signal: {info.get('orscr_signal', 'N/A')}\n"
-            )
+    # Fetch live market data for context
+    market_data_response = get_all_market_prices()
+    market_data = market_data_response.json # Get the JSON content directly
 
-    # --- DEBUG LOGGING ---
-    app.logger.info(f"Market context sent to Gemini: '{market_context.strip()}'")
-    # --- END DEBUG LOGGING ---
+    # Fetch mock trade history for context
+    trade_history = get_trades().json # Get the JSON content directly
 
-    # --- Fetch Trade Logs for AI Context ---
-    trades = read_trades()
-    trade_context = ""
+    # Construct context for Gemini - MODIFIED FOR FRIENDLIER TONE
+    context = f"""
+    You are Aura, an AI trading assistant. Your goal is to provide insightful, helpful, and **friendly** responses to the user's trading-related questions.
+    Adopt a **conversational, approachable, and encouraging tone**. Avoid overly formal or robotic language.
+    You can use emojis if appropriate to convey friendliness (e.g., 😊📈).
 
-    if trades:
-        total_profit_loss = sum(trade['profit_loss'] for trade in trades)
-        total_trades = len(trades)
-        profitable_trades = sum(1 for trade in trades if trade['profit_loss'] > 0)
-        win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0.0
-        avg_profit_per_trade = (total_profit_loss / total_trades) if total_trades > 0 else 0.0
+    Here is the current live market data:
+    {json.dumps(market_data, indent=2)}
 
-        trade_context = "\nYour Trading History Summary:\n"
-        trade_context += f"- Total Trades: {total_trades}\n"
-        trade_context += f"- Total P/L: {total_profit_loss:.2f} USD\n"
-        trade_context += f"- Win Rate: {win_rate:.2f}%\n"
-        trade_context += f"- Avg. P/L per Trade: {avg_profit_per_trade:.2f} USD\n"
+    Here is the user's recent trade history:
+    {json.dumps(trade_history, indent=2)}
 
-    # Construct the full prompt for Gemini, including context
-    full_prompt = (
-        f"You are a helpful and knowledgeable AI trading assistant named {ai_name}. "
-        f"Your purpose is to assist {user_name} with trading-related questions, market analysis, "
-        f"and general inquiries. You now have access to live market data including technical indicators and {user_name}'s trading history. "
-        f"Use this context to provide more informed and personalized answers. "
-        f"Be concise, informative, and always encourage users to do their own research. "
-        f"Do not provide financial advice or recommendations to buy/sell. "
-        f"Do not act as a trading bot or execute trades. "
-        f"Do not make up prices or trade data if not explicitly provided.\n\n"
-        f"--- Context ---\n"
-        f"{market_context}\n"
-        f"{trade_context}\n"
-        f"--- End Context ---\n\n"
-        f"User: {user_message}"
-    )
+    User's question: {user_message}
+    """
 
     try:
-        global model
-        if model is None:
-            # Check if GOOGLE_API_KEY is available before attempting to re-initialize model
-            if GOOGLE_API_KEY:
-                app.logger.warning("Gemini model not initialized globally. Attempting to initialize now within /chat.")
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                app.logger.info("Gemini model initialized successfully within /chat.")
-            else:
-                return jsonify({"error": "Gemini AI model not initialized: GOOGLE_API_KEY is missing."}), 500
+        response = gemini_model.generate_content(context)
+        ai_response = response.candidates[0].content.parts[0].text
+        return jsonify({"response": ai_response})
+    except Exception as e:
+        print(f"Error generating content with Gemini: {e}")
+        traceback.print_exc() # Print full traceback
+        return jsonify({"error": f"Failed to get AI response: {e}"}), 500
 
+# --- Trade Log Endpoints (Existing - using local JSON file) ---
+TRADE_LOG_FILE = 'trades.json'
 
-        app.logger.info("Attempting to generate content with gemini-1.5-flash...")
-        response = model.generate_content(full_prompt)
-        gemini_response_text = response.text
-        app.logger.info("Gemini content generation successful.")
+def load_trades():
+    if os.path.exists(TRADE_LOG_FILE):
+        with open(TRADE_LOG_FILE, 'r') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return []
+    return []
 
-        return jsonify({"response": gemini_response_text}), 200
+def save_trades(trades):
+    with open(TRADE_LOG_FILE, 'w') as f:
+        json.dump(trades, f, indent=4)
+
+@app.route('/log_trade', methods=['POST'])
+def log_trade():
+    trade_data = request.json
+    if not trade_data:
+        return jsonify({"error": "No trade data provided"}), 400
+
+    trades = load_trades()
+    trade_data['id'] = len(trades) + 1 # Simple ID generation
+    trade_data['timestamp'] = datetime.now().isoformat()
+    trades.append(trade_data)
+    save_trades(trades)
+    return jsonify({"message": "Trade logged successfully!", "trade": trade_data}), 201
+
+@app.route('/get_trades', methods=['GET'])
+def get_trades():
+    trades = load_trades()
+    return jsonify(trades)
+
+# --- ORMCR Analysis Endpoint ---
+
+# Mapping for Bybit interval strings and data limits
+BYBIT_INTERVAL_MAP = {
+    "M1": {"interval": "1", "limit": 500}, # Increased limit
+    "M5": {"interval": "5", "limit": 500}, # Increased limit
+    "M15": {"interval": "15", "limit": 500}, # Increased limit
+    "M30": {"interval": "30", "limit": 500}, # Increased limit
+    "H1": {"interval": "60", "limit": 500}, # Increased limit
+    "H4": {"interval": "240", "limit": 500}, # Increased limit
+    "D1": {"interval": "D", "limit": 500}, # Increased limit
+}
+
+def fetch_real_ohlcv(symbol, interval_key):
+    """Fetches real OHLCV data from Bybit for a given symbol and interval."""
+    if not bybit_client:
+        print("Bybit client not initialized. Cannot fetch real data.")
+        return pd.DataFrame()
+
+    bybit_interval = BYBIT_INTERVAL_MAP[interval_key]["interval"]
+    limit = BYBIT_INTERVAL_MAP[interval_key]["limit"]
+
+    try:
+        # Bybit kline data is ordered from newest to oldest.
+        kline_response = bybit_client.get_kline(
+            category="spot", # Assuming spot market for now
+            symbol=symbol,
+            interval=bybit_interval,
+            limit=limit
+        )
+        kline_data = kline_response.get('result', {}).get('list', [])
+
+        if not kline_data:
+            print(f"No kline data found for {symbol} on {interval_key} interval.")
+            return pd.DataFrame()
+
+        # Convert to DataFrame and reverse to oldest to newest for pandas_ta
+        df = pd.DataFrame(kline_data, columns=['start', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+        df['start'] = pd.to_datetime(df['start'], unit='ms')
+        df[['open', 'high', 'low', 'close', 'volume', 'turnover']] = df[['open', 'high', 'low', 'close', 'volume', 'turnover']].apply(pd.to_numeric)
+        df.set_index('start', inplace=True)
+        df = df.iloc[::-1] # Reverse the DataFrame to be oldest to newest
+
+        return df
 
     except Exception as e:
-        app.logger.error(f"Error communicating with Gemini API for generateContent. Exception details: {e}")
-        return jsonify({"error": f"Failed to get response from AI. Please check your Gemini API key and backend logs. Details: {str(e)}"}), 500
+        print(f"Error fetching real OHLCV data for {symbol} ({interval_key}): {e}")
+        traceback.print_exc()
+        return pd.DataFrame()
+
+
+def calculate_indicators_for_df(df, indicators):
+    """Calculates selected indicators for a DataFrame."""
+    df_copy = df.copy()
+    
+    # Use append=True to add indicators directly to the DataFrame
+    if "RSI" in indicators:
+        df_copy.ta.rsi(append=True) # Adds 'RSI_14'
+    if "MACD" in indicators:
+        df_copy.ta.macd(append=True) # Adds 'MACD_12_26_9', 'MACDH_12_26_9', 'MACDS_12_26_9'
+    if "Moving Averages" in indicators:
+        df_copy.ta.ema(length=9, append=True) # Adds 'EMA_9' for ORMCR EMA alignment
+        df_copy.ta.sma(length=20, append=True) # Adds 'SMA_20'
+        df_copy.ta.ema(length=50, append=True) # Adds 'EMA_50'
+    if "Bollinger Bands" in indicators:
+        df_copy.ta.bbands(append=True) # Adds 'BBL_5_2.0', 'BBM_5_2.0', 'BBU_5_2.0' (default length 5, std 2)
+    if "Stochastic Oscillator" in indicators:
+        df_copy.ta.stoch(append=True) # Adds 'STOCHk_14_3_3', 'STOCHd_14_3_3'
+    if "Volume" in indicators:
+        # Volume is already in the data, just ensure it's numeric
+        df_copy['volume'] = pd.to_numeric(df_copy['volume'])
+    if "ATR" in indicators:
+        df_copy.ta.atr(append=True) # Adds 'ATR_14'
+
+    return df_copy
+
+def apply_ormcr_logic(analysis_data):
+    """Applies simplified ORMCR logic to the analysis data and prepares for Gemini."""
+    overall_bias = "NEUTRAL"
+    confirmation_status = "PENDING"
+    confirmation_reason = "Initial analysis."
+    entry_suggestion = "MONITOR"
+    sl_price = "N/A"
+    tp1_price = "N/A"
+    tp2_price = "N/A"
+    risk_in_points = "N/A"
+    position_size_suggestion = "User to calculate"
+
+    # Sort timeframes from highest to lowest for top-down analysis
+    # Use a custom sort key for timedelta if needed, but for string keys, direct comparison works if they are consistent
+    sorted_timeframes = sorted(analysis_data.keys(), key=lambda x: int(BYBIT_INTERVAL_MAP.get(x, {"interval": "0"}).get("interval")) if BYBIT_INTERVAL_MAP[x]["interval"].isdigit() else 999999, reverse=True)
+
+    print(f"\n--- Starting ORMCR Logic ---")
+    print(f"Sorted Timeframes: {sorted_timeframes}")
+
+    trend_analysis = {}
+    for tf in sorted_timeframes:
+        df = analysis_data[tf]['df']
+        if df.empty:
+            trend_analysis[tf] = "No data for analysis."
+            print(f"  {tf}: No data for analysis.")
+            continue
+
+        # Get values from the most recent candle (iloc[-1] after reversing)
+        last_close = get_indicator_value(df, 'close')
+        ema9 = get_indicator_value(df, 'EMA_9')
+        rsi = get_indicator_value(df, 'RSI_14')
+        macd_hist = get_indicator_value(df, 'MACDH_12_26_9')
+
+        tf_trend = "Neutral"
+        # Ensure enough data points for consistent trend check (at least 2 candles)
+        # Check for numeric values before comparison
+        if len(df) >= 2 and isinstance(ema9, (int, float)) and isinstance(last_close, (int, float)) and 'EMA_9' in df.columns:
+            # Get previous EMA and close values safely (iloc[-2] for previous)
+            prev_ema9 = df['EMA_9'].iloc[-2] if not pd.isna(df['EMA_9'].iloc[-2]) else np.nan
+            prev_close = df['close'].iloc[-2] if not pd.isna(df['close'].iloc[-2]) else np.nan
+
+            if not pd.isna(prev_ema9) and not pd.isna(prev_close):
+                if last_close > ema9 and prev_close > prev_ema9: # Both current and previous candle above EMA
+                    tf_trend = "Uptrend"
+                elif last_close < ema9 and prev_close < prev_ema9: # Both current and previous candle below EMA
+                    tf_trend = "Downtrend"
+        
+        trend_analysis[tf] = {
+            "trend": tf_trend,
+            "last_close": last_close,
+            "ema9": ema9,
+            "rsi": rsi,
+            "macd_hist": macd_hist
+        }
+        print(f"  {tf} Trend Analysis: {trend_analysis[tf]}")
+    
+    # Determine overall bias from higher timeframes (prioritizing H4, then H1)
+    for tf in ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]: # Ordered by priority
+        if tf in trend_analysis and trend_analysis[tf]["trend"] != "Neutral":
+            overall_bias = trend_analysis[tf]["trend"].upper() # Convert "Uptrend" to "BULLISH"
+            print(f"  Overall Bias determined from {tf}: {overall_bias}")
+            break # Take the highest timeframe's clear trend
+    print(f"Final Overall Bias: {overall_bias}")
+
+    # Confirmation (focus on lowest timeframe for entry)
+    lowest_tf = sorted_timeframes[-1] if sorted_timeframes else None
+    print(f"Lowest Timeframe for Confirmation: {lowest_tf}")
+
+    if lowest_tf and lowest_tf in analysis_data and not analysis_data[lowest_tf]['df'].empty:
+        df_lowest = analysis_data[lowest_tf]['df']
+        last_close_lowest = get_indicator_value(df_lowest, 'close') # Get most recent
+        prev_close_lowest = df_lowest['close'].iloc[-2] if len(df_lowest) > 1 and not pd.isna(df_lowest['close'].iloc[-2]) else np.nan # Get previous
+
+        # Get indicator values for lowest timeframe from the most recent candle (iloc[-1])
+        ema9_lowest = get_indicator_value(df_lowest, 'EMA_9')
+        rsi_lowest = get_indicator_value(df_lowest, 'RSI_14')
+        macd_lowest = get_indicator_value(df_lowest, 'MACD_12_26_9')
+        macds_lowest = get_indicator_value(df_lowest, 'MACDS_12_26_9')
+        stoch_k_lowest = get_indicator_value(df_lowest, 'STOCHk_14_3_3') # Added for more robust check
+
+        print(f"  Lowest TF ({lowest_tf}) Indicator Values:")
+        print(f"    Last Close: {last_close_lowest}, Prev Close: {prev_close_lowest}")
+        print(f"    EMA9: {ema9_lowest}, RSI: {rsi_lowest}")
+        print(f"    MACD: {macd_lowest}, MACDS: {macds_lowest}, STOCH_K: {stoch_k_lowest}")
+
+        # Check for numeric values before comparison
+        # Ensure all required indicators are numeric and not "N/A"
+        required_indicators = [last_close_lowest, prev_close_lowest, ema9_lowest, rsi_lowest, macd_lowest, macds_lowest, stoch_k_lowest]
+        
+        # Check for which indicators are 'N/A' to provide a more specific reason
+        missing_indicators = [
+            name for name, val in zip(['Last Close', 'Prev Close', 'EMA9', 'RSI', 'MACD', 'MACDS', 'STOCH_K'], required_indicators)
+            if val == "N/A" or pd.isna(val)
+        ]
+
+        if missing_indicators:
+            confirmation_reason = f"Insufficient numeric data for lowest timeframe confirmation. Missing or NaN indicators: {', '.join(missing_indicators)}."
+            print(f"  Confirmation Reason: {confirmation_reason}")
+        else:
+            # Simple confirmation logic (needs to be expanded for full ORMCR)
+            if overall_bias == "BULLISH":
+                # Strong bullish candle (mock: price increased significantly)
+                if last_close_lowest > prev_close_lowest * 1.001:
+                    if last_close_lowest > ema9_lowest: # Price above EMA
+                        if rsi_lowest > 50: # RSI bullish
+                            if macd_lowest > macds_lowest: # MACD bullish cross
+                                if stoch_k_lowest > 20 and stoch_k_lowest < 80: # Stochastic not overbought/oversold
+                                    confirmation_status = "STRONG CONFIRMATION"
+                                    confirmation_reason = "Strong bullish candle, price above EMA, RSI > 50, MACD bullish crossover, Stochastic in mid-range."
+                                    entry_suggestion = "ENTER NOW"
+                                    # Mock SL/TP based on a simple percentage of current price
+                                    sl_price = round(last_close_lowest * 0.995, 2) # 0.5% SL
+                                    tp1_price = round(last_close_lowest * 1.01, 2) # 1% TP1
+                                    tp2_price = round(last_close_lowest * 1.02, 2) # 2% TP2
+                                    risk_in_points = round(last_close_lowest - sl_price, 2)
+                                    position_size_suggestion = "2.5% of balance (example)"
+                                else:
+                                    confirmation_reason = "Stochastic not in optimal range for BUY."
+                            else:
+                                confirmation_reason = "Missing MACD confirmation for BUY."
+                        else:
+                            confirmation_reason = "Missing RSI confirmation for BUY."
+                    else:
+                        confirmation_reason = "Price not above EMA for BUY."
+                else:
+                    confirmation_reason = "No strong bullish candle for BUY confirmation."
+            elif overall_bias == "BEARISH":
+                # Strong bearish candle (mock: price decreased significantly)
+                if last_close_lowest < prev_close_lowest * 0.999:
+                    if last_close_lowest < ema9_lowest: # Price below EMA
+                        if rsi_lowest < 50: # RSI bearish
+                            if macd_lowest < macds_lowest: # MACD bearish cross
+                                if stoch_k_lowest > 20 and stoch_k_lowest < 80: # Stochastic not overbought/oversold
+                                    confirmation_status = "STRONG CONFIRMATION"
+                                    confirmation_reason = "Strong bearish candle, price below EMA, RSI < 50, MACD bearish crossover, Stochastic in mid-range."
+                                    entry_suggestion = "ENTER NOW"
+                                    # Mock SL/TP based on a simple percentage of current price
+                                    sl_price = round(last_close_lowest * 1.005, 2) # 0.5% SL
+                                    tp1_price = round(last_close_lowest * 0.99, 2) # 1% TP1
+                                    tp2_price = round(last_close_lowest * 0.98, 2) # 2% TP2
+                                    risk_in_points = round(sl_price - last_close_lowest, 2)
+                                    position_size_suggestion = "2.5% of balance (example)"
+                                else:
+                                    confirmation_reason = "Stochastic not in optimal range for SELL."
+                            else:
+                                confirmation_reason = "Missing MACD confirmation for SELL."
+                        else:
+                            confirmation_reason = "Missing RSI confirmation for SELL."
+                    else:
+                        confirmation_reason = "Price not below EMA for SELL."
+                else:
+                    confirmation_reason = "No strong bearish candle for SELL confirmation."
+            else:
+                confirmation_reason = "Overall bias is neutral, no strong entry signal."
+            print(f"  Confirmation Status: {confirmation_status}, Reason: {confirmation_reason}")
+    else:
+        confirmation_reason = "Not enough data for lowest timeframe confirmation or lowest timeframe not selected."
+        print(f"  Confirmation Reason: {confirmation_reason}")
+        
+    if entry_suggestion == "MONITOR": # If not confirmed, set to PENDING
+        confirmation_status = "PENDING"
+        
+    print(f"--- ORMCR Logic Finished ---")
+    print(f"Final ORMCR Results: Overall Bias={overall_bias}, Confirmation Status={confirmation_status}, Reason={confirmation_reason}")
+
+    return {
+        "overall_bias": overall_bias,
+        "confirmation_status": confirmation_status,
+        "confirmation_reason": confirmation_reason,
+        "entry_suggestion": entry_suggestion,
+        "sl_price": sl_price,
+        "tp1_price": tp1_price,
+        "tp2_price": tp2_price,
+        "risk_in_points": risk_in_points, # Ensure this is a number or "N/A"
+        "position_size_suggestion": position_size_suggestion,
+        "trend_analysis_by_tf": {tf: {k: v for k, v in data.items() if k != 'df'} for tf, data in analysis_data.items()} # Exclude DataFrame
+    }
+
+@app.route('/run_ormcr_analysis', methods=['POST'])
+def run_ormcr_analysis():
+    if not gemini_model:
+        return jsonify({"error": "Gemini model not initialized"}), 500
+    if not bybit_client:
+        return jsonify({"error": "Bybit client not initialized"}), 500
+
+    data = request.json
+    currency_pair = data.get('currencyPair')
+    timeframes = data.get('timeframes', []) # Now expects a list
+    trade_type = data.get('tradeType')
+    indicators = data.get('indicators', [])
+    available_balance = data.get('availableBalance')
+    leverage = data.get('leverage')
+
+    if not currency_pair or not timeframes:
+        return jsonify({"error": "Currency pair and at least one timeframe are required"}), 400
+
+    # Ensure timeframes are valid and sorted for top-down analysis
+    valid_timeframes = [tf for tf in timeframes if tf in BYBIT_INTERVAL_MAP]
+    if not valid_timeframes:
+        return jsonify({"error": "No valid timeframes provided"}), 400
+    
+    # Sort timeframes from highest to lowest for top-down analysis based on interval value
+    valid_timeframes.sort(key=lambda x: int(BYBIT_INTERVAL_MAP[x]["interval"]) if BYBIT_INTERVAL_MAP[x]["interval"].isdigit() else 999999, reverse=True)
+
+
+    analysis_data_by_tf = {}
+    bybit_symbol = currency_pair.replace('/', '') + 'T' # Convert BTC/USD to BTCUSDT
+
+    # Step 1: Fetch real OHLCV data for each selected timeframe
+    for tf in valid_timeframes:
+        df = fetch_real_ohlcv(bybit_symbol, tf)
+        
+        if df.empty:
+            print(f"Skipping {tf} due to empty DataFrame after fetching real data.")
+            continue # Skip this timeframe if no data was fetched
+
+        df_with_indicators = calculate_indicators_for_df(df, indicators)
+        
+        # Debugging prints for analysis dataframes
+        print(f"\n--- DataFrame for {tf} after indicator calculation (Head) ---")
+        print(df_with_indicators.head()) # Head will be oldest data
+        print(f"\n--- DataFrame for {tf} after indicator calculation (Tail) ---")
+        print(df_with_indicators.tail()) # Tail will be newest data
+
+        # Ensure last_price and volume are floats and handle potential NaNs
+        # Use iloc[-1] because DataFrame is now oldest to newest
+        last_price_val = get_indicator_value(df_with_indicators, 'close') # Most recent close
+        volume_val = get_indicator_value(df_with_indicators, 'volume') # Most recent volume
+
+
+        analysis_data_by_tf[tf] = {
+            "df": df_with_indicators,
+            "last_price": last_price_val,
+            "volume": volume_val
+        }
+        # No need to update initial_price for next timeframe as each is fetched independently
+
+    if not analysis_data_by_tf:
+        return jsonify({"error": "No valid market data could be fetched for analysis. Please check currency pair and timeframes."}), 500
+
+
+    # Step 2: Apply ORMCR logic
+    ormcr_results = apply_ormcr_logic(analysis_data_by_tf)
+
+    # Step 3: Construct prompt for Gemini
+    # Ensure all numerical values in detailed_timeframe_data are properly converted
+    detailed_tf_data_for_prompt = {}
+    for tf, data in analysis_data_by_tf.items():
+        indicators_snapshot_dict = {}
+        # List all possible pandas_ta indicator column names
+        indicator_cols = [
+            'RSI_14', 'MACD_12_26_9', 'MACDH_12_26_9', 'MACDS_12_26_9',
+            'EMA_9', 'SMA_20', 'EMA_50',
+            'BBL_5_2.0', 'BBM_5_2.0', 'BBU_5_2.0', # Bollinger Bands
+            'STOCHk_14_3_3', 'STOCHd_14_3_3', # Stochastic
+            'ATR_14', # ATR
+            'volume' # Volume is also a numeric column
+        ]
+        for ind_col in indicator_cols:
+            # Use the improved get_indicator_value here as well
+            indicators_snapshot_dict[ind_col] = get_indicator_value(data["df"], ind_col)
+        
+        detailed_tf_data_for_prompt[tf] = {
+            "last_price": data["last_price"],
+            "volume": data["volume"],
+            "indicators_snapshot": indicators_snapshot_dict
+        }
+    
+    # Debugging print for indicators_snapshot_dict before sending to Gemini
+    print(f"\n--- Indicators Snapshot before sending to Gemini ---")
+    print(json.dumps(detailed_tf_data_for_prompt, indent=2))
+    print("-" * 40)
+
+
+    prompt_parts = [
+        "You are Aura, an advanced AI trading assistant specializing in the ORMCR strategy.",
+        "The user has requested an analysis for:",
+        f"- Currency Pair: {currency_pair}",
+        f"- Selected Timeframes (highest to lowest): {', '.join(valid_timeframes)}",
+        f"- Intended Trade Type: {trade_type}",
+        f"- Selected Indicators: {', '.join(indicators) if indicators else 'None'}",
+        f"- Available Balance: ${available_balance}",
+        f"- Leverage: {leverage}",
+        "\nHere is the detailed market data and ORMCR analysis results from our internal system:",
+        json.dumps({
+            "ormcr_analysis": ormcr_results,
+            "detailed_timeframe_data": detailed_tf_data_for_prompt
+        }, indent=2),
+        "\nBased on this information, provide a comprehensive AI ANALYSIS RESULTS. Follow this exact structure:",
+        """
+        {
+            "confidence_score": "X%",
+            "signal_strength": "STRONG BUY/BUY/NEUTRAL/SELL/STRONG SELL",
+            "market_summary": "Detailed summary based on multi-timeframe trend, price action, and key indicators.",
+            "ai_suggestion": {
+                "entry_type": "BUY ORDER/SELL ORDER/WAIT",
+                "recommended_action": "ENTER NOW/MONITOR/AVOID",
+                "position_size": "X% of balance"
+            },
+            "stop_loss": {
+                "price": "$X.XX",
+                "percentage_change": "X.XX%"
+            },
+            "take_profit_1": {
+                "price": "$X.XX",
+                "percentage_change": "X.XX%"
+            },
+            "take_profit_2": {
+                "price": "$X.XX",
+                "percentage_change": "X.XX%"
+            },
+            "technical_indicators_analysis": "Based on the 'indicators_snapshot' provided in 'detailed_timeframe_data', interpret the values for all selected indicators (RSI, MACD, Stochastic, Moving Averages, Bollinger Bands, Volume, ATR, Fibonacci Retracements if applicable) across the relevant timeframes, focusing on the lowest timeframe for potential entry signals. Explain what each indicator suggests about market conditions (e.g., overbought/oversold for RSI, momentum for MACD, volatility for Bollinger Bands, etc.).",
+            "next_step_for_user": "What the user should do next (e.g., 'Monitor for confirmation', 'Proceed with the trade', 'Review other timeframes')."
+        }
+        """,
+        "\nIf 'ormcr_confirmation_status' is 'PENDING', ensure 'entry_type' is 'WAIT' and 'recommended_action' is 'MONITOR', and explain why in 'market_summary' and 'next_step_for_user'. Also, if 'ormcr_confirmation_status' is 'PENDING', provide 'N/A' for SL/TP prices and percentages.",
+        "\n**IMPORTANT: Maintain a friendly, conversational, and encouraging tone throughout your response. Use simple, clear language and feel free to include relevant emojis to enhance friendliness (e.g., 😊📈).**"
+    ]
+
+    try:
+        # Use response_schema for structured output
+        response = gemini_model.generate_content(
+            prompt_parts,
+            generation_config={
+                "response_mime_type": "application/json",
+                "response_schema": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "confidence_score": {"type": "STRING"},
+                        "signal_strength": {"type": "STRING"},
+                        "market_summary": {"type": "STRING"},
+                        "ai_suggestion": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "entry_type": {"type": "STRING"},
+                                "recommended_action": {"type": "STRING"},
+                                "position_size": {"type": "STRING"}
+                            }
+                        },
+                        "stop_loss": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "price": {"type": "STRING"},
+                                "percentage_change": {"type": "STRING"}
+                            }
+                        },
+                        "take_profit_1": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "price": {"type": "STRING"},
+                                "percentage_change": {"type": "STRING"}
+                            }
+                        },
+                        "take_profit_2": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "price": {"type": "STRING"},
+                                "percentage_change": {"type": "STRING"}
+                            }
+                        },
+                        "technical_indicators_analysis": {"type": "STRING"}, # Changed to STRING
+                        "next_step_for_user": {"type": "STRING"}
+                    },
+                    "required": ["confidence_score", "signal_strength", "market_summary", "ai_suggestion", "stop_loss", "take_profit_1", "take_profit_2", "technical_indicators_analysis", "next_step_for_user"]
+                }
+            }
+        )
+        
+        # Parse the JSON string response
+        ai_analysis_results = json.loads(response.candidates[0].content.parts[0].text)
+
+        # Add ORMCR specific flags for frontend to interpret
+        ai_analysis_results['ormcr_confirmation_status'] = ormcr_results['confirmation_status']
+        ai_analysis_results['ormcr_overall_bias'] = ormcr_results['overall_bias']
+        ai_analysis_results['ormcr_reason'] = ormcr_results['confirmation_reason']
+
+        # If confirmation is pending, ensure SL/TP are N/A in the final response to frontend
+        if ai_analysis_results['ormcr_confirmation_status'] == "PENDING":
+            ai_analysis_results['stop_loss']['price'] = "N/A"
+            ai_analysis_results['stop_loss']['percentage_change'] = "N/A"
+            ai_analysis_results['take_profit_1']['price'] = "N/A"
+            ai_analysis_results['take_profit_1']['percentage_change'] = "N/A"
+            ai_analysis_results['take_profit_2']['price'] = "N/A"
+            ai_analysis_results['take_profit_2']['percentage_change'] = "N/A"
+
+
+        return jsonify(ai_analysis_results)
+
+    except Exception as e:
+        print(f"Error generating ORMCR analysis with Gemini: {e}")
+        traceback.print_exc() # Print full traceback
+        return jsonify({"error": f"Failed to get AI analysis: {e}"}), 500
+
 
 if __name__ == '__main__':
-    # For local development, you can set dummy API keys here if you don't use a .env file
-    # These should be set as environment variables on Render, not directly in code for deployment.
-    if not BYBIT_API_KEY:
-        os.environ['BYBIT_API_KEY'] = 't6IvPLjmcfebdiq8YU' # Replace with actual key for local testing
-    if not BYBIT_API_SECRET:
-        os.environ['BYBIT_API_SECRET'] = '3k9ud15KPByDuVfzxdA7IMn7GjcEMTdtAKwu' # Replace with actual secret for local testing
-    if not GOOGLE_API_KEY:
-        os.environ['GOOGLE_API_KEY'] = 'AIzaSyB93HS1At5wxdw0HKLh-7f2195oAVYNKeU' # For local testing of AI features
-
     app.run(host='0.0.0.0', port=os.environ.get('PORT', 10000), debug=False)
