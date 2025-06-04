@@ -15,8 +15,8 @@ import traceback # Import traceback for detailed error logging
 # Load environment variables from .env file
 load_dotenv()
 
-app = Flask(__name__)
-CORS(app) # Enable CORS for all routes
+app = Flask(__name__) # Initialize your Flask app first
+CORS(app) # THEN enable CORS for the app instance
 
 # --- Configuration ---
 BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY')
@@ -699,3 +699,4 @@ def run_ormcr_analysis():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=os.environ.get('PORT', 10000), debug=False)
+ 
