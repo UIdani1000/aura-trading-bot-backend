@@ -587,7 +587,8 @@ def run_ormcr_analysis():
             "last_price": last_price_val,
             "volume": volume_val
         }
-        # No need to update initial_price for next timeframe as each is fetched independently
+        # Add a small delay between fetching data for different timeframes
+        time.sleep(0.2) # 200 ms delay
 
     if not analysis_data_by_tf:
         return jsonify({"error": "No valid market data could be fetched for analysis. Please check currency pair and timeframes."}), 500
