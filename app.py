@@ -57,7 +57,11 @@ def get_indicator_value(df, indicator_name, default_val="N/A"):
         # Drop NaN values and get the last (most recent) valid value
         valid_values = df[indicator_name].dropna()
         if not valid_values.empty:
-            return round(float(valid_values.iloc[-1]), 2) # Use iloc[-1] as DataFrame is oldest to newest
+            # DEBUG: Print the raw value before returning
+            raw_val = valid_values.iloc[-1]
+            print(f"DEBUG: get_indicator_value for {indicator_name}: Raw value found: {raw_val}")
+            return round(float(raw_val), 2) # Use iloc[-1] as DataFrame is oldest to newest
+    print(f"DEBUG: get_indicator_value for {indicator_name}: No valid values found, returning 'N/A'")
     return default_val
 
 # Function to fetch live market data (for dashboard)
@@ -301,6 +305,16 @@ def calculate_indicators_for_df(df, indicators):
     if "ATR" in indicators:
         df_copy.ta.atr(append=True) # Adds 'ATR_14'
 
+    # --- NEW DEBUG PRINT: Show last few rows for critical indicators ---
+    print("\n--- DEBUG: DataFrame Tail for Indicator Columns after pandas_ta calculation ---")
+    selected_cols = [col for col in ['MACD_12_26_9', 'MACDS_12_26_9', 'MACDH_12_26_9', 'ATR_14', 'RSI_14', 'STOCHk_14_3_3'] if col in df_copy.columns]
+    if selected_cols:
+        print(df_copy[selected_cols].tail(10)) # Show last 10 rows for these columns
+    else:
+        print("No selected indicator columns found in DataFrame after calculation.")
+    print("------------------------------------------------------------------")
+    # --- END NEW DEBUG PRINT ---
+
     return df_copy
 
 def apply_ormcr_logic(analysis_data):
@@ -380,11 +394,12 @@ def apply_ormcr_logic(analysis_data):
         macds_lowest = get_indicator_value(df_lowest, 'MACDS_12_26_9')
         stoch_k_lowest = get_indicator_value(df_lowest, 'STOCHk_14_3_3')
         stoch_d_lowest = get_indicator_value(df_lowest, 'STOCHd_14_3_3') # Added Stochastic D
+        atr_lowest = get_indicator_value(df_lowest, 'ATR_14') # Added ATR
 
         print(f"  Lowest TF ({lowest_tf}) Indicator Values:")
         print(f"    Last Close: {last_close_lowest}, Prev Close: {prev_close_lowest}")
         print(f"    EMA9: {ema9_lowest}, RSI: {rsi_lowest}")
-        print(f"    MACD: {macd_lowest}, MACDS: {macds_lowest}, STOCH_K: {stoch_k_lowest}, STOCH_D: {stoch_d_lowest}")
+        print(f"    MACD: {macd_lowest}, MACDS: {macds_lowest}, STOCH_K: {stoch_k_lowest}, STOCH_D: {stoch_d_lowest}, ATR: {atr_lowest}")
 
         required_indicators = {
             'Last Close': last_close_lowest,
@@ -394,7 +409,8 @@ def apply_ormcr_logic(analysis_data):
             'MACD': macd_lowest,
             'MACDS': macds_lowest,
             'STOCHk': stoch_k_lowest,
-            'STOCHd': stoch_d_lowest # Include STOCHd in check
+            'STOCHd': stoch_d_lowest,
+            'ATR': atr_lowest # Include ATR in check
         }
         
         missing_indicators = [name for name, val in required_indicators.items() if val == "N/A" or pd.isna(val)]
@@ -588,7 +604,7 @@ def run_ormcr_analysis():
             "volume": volume_val
         }
         # Add a small delay between fetching data for different timeframes
-        time.sleep(0.2) # 200 ms delay
+        time.sleep(0.2) # 200 ms delay to avoid rate limiting for multi-timeframe requests
 
     if not analysis_data_by_tf:
         return jsonify({"error": "No valid market data could be fetched for analysis. Please check currency pair and timeframes."}), 500
