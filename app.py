@@ -153,41 +153,52 @@ def get_all_market_prices():
                 macd_val = get_indicator_value(df, 'MACD_12_26_9', default_val="N/A")
                 
                 # --- REVISED LOGIC FOR MACD SIGNAL IN DASHBOARD ---
-                macds_val_raw = get_indicator_value(df, 'MACDs_12_26_9', default_val="N/A") # Attempt to get the signal line
-                macdh_val_raw = get_indicator_value(df, 'MACDh_12_26_9', default_val="N/A") # Get histogram as fallback
+                # Retrieve all necessary values first
+                macds_val = get_indicator_value(df, 'MACDs_12_26_9', default_val="N/A") # Actual signal line
+                macdh_val = get_indicator_value(df, 'MACDh_12_26_9', default_val="N/A") # Histogram
 
-                if isinstance(macds_val_raw, (int, float)): # If MACD Signal is available and numeric
-                    macd_condition_met = False
-                    if isinstance(macd_val, (int, float)):
-                        if rsi_val > 60 and macd_val > macds_val_raw:
+                # --- FIX: Ensure stoch_k_val is defined ---
+                stoch_k_val = get_indicator_value(df, 'STOCHk_14_3_3', default_val="N/A") # This was missing
+
+                # Condition for MACD (prioritize MACDs, then MACDh)
+                macd_condition_met = False
+                if isinstance(macd_val, (int, float)): # Check if MACD main line is numeric
+                    if isinstance(macds_val, (int, float)): # Prefer MACD Signal Line for crossover
+                        if macd_val > macds_val: # Bullish crossover
                             macd_condition_met = True
-                            print(f"DEBUG: MACD Signal Line (MACDs) confirmed bullish crossover.")
-                        elif rsi_val < 40 and macd_val < macds_val_raw:
+                            print(f"DEBUG: MACD Signal Line (MACDs) indicates bullish momentum (MACD > MACDs).")
+                        elif macd_val < macds_val: # Bearish crossover
                             macd_condition_met = True
-                            print(f"DEBUG: MACD Signal Line (MACDs) confirmed bearish crossover.")
+                            print(f"DEBUG: MACD Signal Line (MACDs) indicates bearish momentum (MACD < MACDs).")
                         else:
                             print(f"DEBUG: MACD Signal Line (MACDs) not confirming direction.")
+                    elif isinstance(macdh_val, (int, float)): # Fallback to MACD Histogram if MACDs is not available or is N/A
+                        if macdh_val > 0: # Bullish: Histogram above 0
+                            macd_condition_met = True
+                            print(f"DEBUG: MACD Histogram (MACDh) indicates bullish momentum (MACDs not available).")
+                        elif macdh_val < 0: # Bearish: Histogram below 0
+                            macd_condition_met = True
+                            print(f"DEBUG: MACD Histogram (MACDh) indicates bearish momentum (MACDs not available).")
+                        else:
+                            print(f"DEBUG: MACD Histogram (MACDh) not confirming direction (MACDs not available).")
                     else:
-                        print(f"DEBUG: MACD_12_26_9 value is not numeric, skipping MACD Signal Line comparison.")
-                elif isinstance(macdh_val_raw, (int, float)): # If MACD Signal not available, use Histogram
-                    macd_condition_met = False
-                    if rsi_val > 60 and macdh_val_raw > 0: # Bullish: Histogram above 0
-                        macd_condition_met = True
-                        print(f"DEBUG: MACD Histogram (MACDh) confirmed bullish momentum (MACDs not available).")
-                    elif rsi_val < 40 and macdh_val_raw < 0: # Bearish: Histogram below 0
-                        macd_condition_met = True
-                        print(f"DEBUG: MACD Histogram (MACDh) confirmed bearish momentum (MACDs not available).")
-                    else:
-                        print(f"DEBUG: MACD Histogram (MACDh) not confirming direction (MACDs not available).")
+                        print(f"DEBUG: Neither MACDs nor MACDh values are numeric, MACD condition skipped.")
                 else:
-                    macd_condition_met = False
-                    print(f"DEBUG: Neither MACDs_12_26_9 nor MACDh_12_26_9 values are numeric, MACD comparison will be skipped.")
+                    print(f"DEBUG: MACD_12_26_9 value is not numeric, skipping MACD condition.")
 
-                # Final ORSCR signal determination for dashboard
+
+                # Final ORSCR signal determination for dashboard - simplified to not use overall_bias
                 if isinstance(rsi_val, (int, float)) and macd_condition_met:
-                    if rsi_val > 60 and overall_bias == "BULLISH": # Assuming overall bias is available here for dashboard as well.
+                    # Determine current trend direction based on RSI and MACD (simplified for dashboard)
+                    if rsi_val > 60 and (
+                        (isinstance(macd_val, (int, float)) and isinstance(macds_val, (int, float)) and macd_val > macds_val) or
+                        (isinstance(macdh_val, (int, float)) and macdh_val > 0)
+                    ):
                         orscr_signal = "BUY"
-                    elif rsi_val < 40 and overall_bias == "BEARISH":
+                    elif rsi_val < 40 and (
+                        (isinstance(macd_val, (int, float)) and isinstance(macds_val, (int, float)) and macd_val < macds_val) or
+                        (isinstance(macdh_val, (int, float)) and macdh_val < 0)
+                    ):
                         orscr_signal = "SELL"
                     else:
                          orscr_signal = "NEUTRAL"
@@ -200,7 +211,7 @@ def get_all_market_prices():
                     "percent_change": round(float(percent_change), 2),
                     "rsi": rsi_val,
                     "macd": macd_val,
-                    "stoch_k": stoch_k_val,
+                    "stoch_k": stoch_k_val, # Now correctly defined
                     "volume": round(float(df['volume'].iloc[-1]), 2),
                     "orscr_signal": orscr_signal
                 }
