@@ -57,12 +57,12 @@ def get_indicator_value(df, indicator_name, default_val="N/A"):
     if indicator_name in df.columns:
         last_val = df[indicator_name].iloc[-1]
         if pd.isna(last_val):
-            print(f"DEBUG: get_indicator_value for {indicator_name}: Last value is NaN, returning 'N/A'")
+            print(f"DEBUG: get_indicator_value for {indicator_name}: Last value is NaN, returning '{default_val}'")
             return default_val
         else:
             print(f"DEBUG: get_indicator_value for {indicator_name}: Raw value found: {last_val}")
             return round(float(last_val), 2)
-    print(f"DEBUG: get_indicator_value for {indicator_name}: Column not found, returning 'N/A'")
+    print(f"DEBUG: get_indicator_value for {indicator_name}: Column not found, returning '{default_val}'")
     return default_val
 
 # Function to fetch live market data (for dashboard)
@@ -78,8 +78,6 @@ def get_all_market_prices():
     for symbol in symbols:
         print(f"\n--- Fetching daily kline data for {symbol} ---")
         try:
-            # Fetch kline data for 1-day interval to get OHLCV for indicator calculation
-            # Bybit kline data is ordered from newest to oldest.
             kline_response = bybit_client.get_kline(
                 category="spot",
                 symbol=symbol,
@@ -89,35 +87,56 @@ def get_all_market_prices():
             kline_data = kline_response.get('result', {}).get('list', [])
 
             if kline_data and len(kline_data) >= 2: # Need at least 2 candles for percent change
-                # Convert to DataFrame
                 df = pd.DataFrame(kline_data, columns=['start', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
                 df['close'] = pd.to_numeric(df['close'])
                 df['volume'] = pd.to_numeric(df['volume'])
-                # Convert 'start' column to numeric (milliseconds) first, then to datetime
-                df['start'] = pd.to_numeric(df['start'])
+                df['start'] = pd.to_numeric(df['start']) # Explicitly cast to numeric to avoid FutureWarning
                 df['start'] = pd.to_datetime(df['start'], unit='ms') 
-                df.set_index('start', inplace=True) # Set index to datetime
-                df = df.iloc[::-1] # CRITICAL FIX: Reverse DataFrame to be OLDEST TO NEWEST
+                df.set_index('start', inplace=True)
+                df = df.iloc[::-1] # Reverse DataFrame to be OLDEST TO NEWEST
 
-                # Now, last_close is df['close'].iloc[-1] (most recent)
                 last_close = df['close'].iloc[-1]
-                # Previous day's close is df['close'].iloc[-2]
                 prev_close = df['close'].iloc[-2] if len(df) > 1 else last_close
                 percent_change = ((last_close - prev_close) / prev_close) * 100 if prev_close != 0 else 0
 
-                # Calculate indicators using pandas_ta, which adds specific column names
+                # --- Apply Indicators for Dashboard ---
+                # These are explicitly calculated for the dashboard view
                 df.ta.rsi(append=True) # Adds 'RSI_14'
                 df.ta.macd(append=True) # Adds 'MACD_12_26_9', 'MACDH_12_26_9', 'MACDS_12_26_9'
                 df.ta.stoch(append=True) # Adds 'STOCHk_14_3_3', 'STOCHd_14_3_3'
+                df.ta.atr(append=True) # Adding ATR for consistent debugging, even if not shown on dashboard initially
+                # Can add EMA, SMA, Bollinger Bands here if needed for dashboard display too.
+                # Example: df.ta.ema(length=9, append=True)
+
+                # --- DEBUG PRINT: Show DataFrame info and tail for dashboard indicators ---
+                print(f"\n--- DEBUG: Dashboard {symbol} DataFrame info after pandas_ta ---")
+                df.info(verbose=False, buf=sys.stdout)
+                print("------------------------------------------------------------------")
+
+                print(f"\n--- DEBUG: Dashboard {symbol} Tail for Indicators after pandas_ta ---")
+                dashboard_cols = ['RSI_14', 'MACD_12_26_9', 'MACDS_12_26_9', 'STOCHk_14_3_3', 'ATR_14']
+                existing_dashboard_cols = [col for col in dashboard_cols if col in df.columns]
+                if existing_dashboard_cols:
+                    tail_data = df[existing_dashboard_cols].tail(10)
+                    print(tail_data)
+                    if tail_data.iloc[-1].isnull().any():
+                        print(f"WARNING: Dashboard {symbol} Last row of selected indicators contains NaN values.")
+                else:
+                    print(f"No selected indicator columns found for dashboard {symbol} after calculation.")
+                print("------------------------------------------------------------------")
+                # --- END DEBUG PRINT ---
+
 
                 orscr_signal = "NEUTRAL"
-                # Access indicators using their pandas_ta generated names from the most recent candle (iloc[-1])
                 rsi_val = get_indicator_value(df, 'RSI_14', default_val="N/A")
                 macd_val = get_indicator_value(df, 'MACD_12_26_9', default_val="N/A")
-                macds_val = get_indicator_value(df, 'MACDS_12_26_9', default_val="N/A")
+                macds_val = get_indicator_value(df, 'MACDS_12_26_9', default_val="N/A") # This will now be properly checked
                 stoch_k_val = get_indicator_value(df, 'STOCHk_14_3_3', default_val="N/A")
+                # ATR value can be retrieved here too if desired for dashboard, but not in ORSCR logic directly
+                # atr_val = get_indicator_value(df, 'ATR_14', default_val="N/A")
 
-                # Check if indicators are numeric before applying ORSCR logic
+
+                # Check if indicators are numeric before applying ORSCR logic for dashboard signal
                 if isinstance(rsi_val, (int, float)) and isinstance(macd_val, (int, float)) and isinstance(macds_val, (int, float)):
                     if rsi_val > 60 and macd_val > macds_val:
                         orscr_signal = "BUY"
@@ -126,13 +145,14 @@ def get_all_market_prices():
                 else:
                     orscr_signal = "N/A (Indicators not available for ORSCR logic)"
 
+
                 market_data[symbol] = {
                     "price": round(float(last_close), 2),
                     "percent_change": round(float(percent_change), 2),
-                    "rsi": rsi_val, # Use the safely retrieved value
-                    "macd": macd_val, # Use the safely retrieved value
-                    "stoch_k": stoch_k_val, # Use the safely retrieved value
-                    "volume": round(float(df['volume'].iloc[-1]), 2), # Use iloc[-1] for newest volume
+                    "rsi": rsi_val,
+                    "macd": macd_val,
+                    "stoch_k": stoch_k_val,
+                    "volume": round(float(df['volume'].iloc[-1]), 2),
                     "orscr_signal": orscr_signal
                 }
                 print(f"Final market_data[{symbol}]: {market_data[symbol]}")
@@ -145,13 +165,13 @@ def get_all_market_prices():
 
         except Exception as e:
             print(f"Error fetching or processing data for {symbol}: {e}")
-            traceback.print_exc() # Print full traceback
+            traceback.print_exc()
             market_data[symbol] = {
                 "price": "N/A", "percent_change": "N/A", "rsi": "N/A",
                 "macd": "N/A", "stoch_k": "N/A", "volume": "N/A", "orscr_signal": "N/A"
             }
         
-        time.sleep(0.5) # Add a small delay between API calls
+        time.sleep(0.5)
 
     return jsonify(market_data)
 
@@ -167,12 +187,12 @@ def chat():
 
     # Fetch live market data for context
     market_data_response = get_all_market_prices()
-    market_data = market_data_response.json # Get the JSON content directly
+    market_data = market_data_response.json
 
     # Fetch mock trade history for context
-    trade_history = get_trades().json # Get the JSON content directly
+    trade_history = get_trades().json
 
-    # Construct context for Gemini - MODIFIED FOR FRIENDLIER TONE
+    # Construct context for Gemini
     context = f"""
     You are Aura, an AI trading assistant. Your goal is to provide insightful, helpful, and **friendly** responses to the user's trading-related questions.
     Adopt a **conversational, approachable, and encouraging tone**. Avoid overly formal or robotic language.
@@ -193,7 +213,7 @@ def chat():
         return jsonify({"response": ai_response})
     except Exception as e:
         print(f"Error generating content with Gemini: {e}")
-        traceback.print_exc() # Print full traceback
+        traceback.print_exc()
         return jsonify({"error": f"Failed to get AI response: {e}"}), 500
 
 # --- Trade Log Endpoints (Existing - using local JSON file) ---
@@ -219,7 +239,7 @@ def log_trade():
         return jsonify({"error": "No trade data provided"}), 400
 
     trades = load_trades()
-    trade_data['id'] = len(trades) + 1 # Simple ID generation
+    trade_data['id'] = len(trades) + 1
     trade_data['timestamp'] = datetime.now().isoformat()
     trades.append(trade_data)
     save_trades(trades)
@@ -253,9 +273,8 @@ def fetch_real_ohlcv(symbol, interval_key):
     limit = BYBIT_INTERVAL_MAP[interval_key]["limit"]
 
     try:
-        # Bybit kline data is ordered from newest to oldest.
         kline_response = bybit_client.get_kline(
-            category="spot", # Assuming spot market for now
+            category="spot",
             symbol=symbol,
             interval=bybit_interval,
             limit=limit
@@ -266,7 +285,6 @@ def fetch_real_ohlcv(symbol, interval_key):
             print(f"No kline data found for {symbol} on {interval_key} interval.")
             return pd.DataFrame()
 
-        # Convert to DataFrame and reverse to oldest to newest for pandas_ta
         df = pd.DataFrame(kline_data, columns=['start', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
         df['start'] = pd.to_numeric(df['start']) # Explicitly cast to numeric to avoid FutureWarning
         df['start'] = pd.to_datetime(df['start'], unit='ms')
@@ -286,40 +304,38 @@ def calculate_indicators_for_df(df, indicators):
     """Calculates selected indicators for a DataFrame."""
     df_copy = df.copy()
     
-    # Use append=True to add indicators directly to the DataFrame
     if "RSI" in indicators:
-        df_copy.ta.rsi(append=True) # Adds 'RSI_14'
+        df_copy.ta.rsi(append=True)
     if "MACD" in indicators:
-        df_copy.ta.macd(append=True) # Adds 'MACD_12_26_9', 'MACDH_12_26_9', 'MACDS_12_26_9'
+        df_copy.ta.macd(append=True)
     if "Moving Averages" in indicators:
-        df_copy.ta.ema(length=9, append=True) # Adds 'EMA_9' for ORMCR EMA alignment
-        df_copy.ta.sma(length=20, append=True) # Adds 'SMA_20'
-        df_copy.ta.ema(length=50, append=True) # Adds 'EMA_50'
+        df_copy.ta.ema(length=9, append=True)
+        df_copy.ta.sma(length=20, append=True)
+        df_copy.ta.ema(length=50, append=True)
     if "Bollinger Bands" in indicators:
-        df_copy.ta.bbands(append=True) # Adds 'BBL_5_2.0', 'BBM_5_2.0', 'BBU_5_2.0' (default length 5, std 2)
+        df_copy.ta.bbands(append=True)
     if "Stochastic Oscillator" in indicators:
-        df_copy.ta.stoch(append=True) # Adds 'STOCHk_14_3_3', 'STOCHd_14_3_3'
+        df_copy.ta.stoch(append=True)
     if "Volume" in indicators:
-        # Volume is already in the data, just ensure it's numeric
         df_copy['volume'] = pd.to_numeric(df_copy['volume'])
     if "ATR" in indicators:
-        df_copy.ta.atr(append=True) # Adds 'ATR_14'
+        df_copy.ta.atr(append=True)
 
     # --- DEBUG PRINT: Show DataFrame info and tail for critical indicators ---
-    print(f"\n--- DEBUG: DataFrame info after pandas_ta for columns: {df_copy.columns.tolist()} ---")
-    df_copy.info(verbose=False, buf=sys.stdout) # Print info to stdout
+    print(f"\n--- DEBUG: ORMCR Analysis DataFrame info after pandas_ta for columns: {df_copy.columns.tolist()} ---")
+    df_copy.info(verbose=False, buf=sys.stdout)
     print("------------------------------------------------------------------")
 
-    print("\n--- DEBUG: DataFrame Tail for Critical Indicators after pandas_ta calculation ---")
-    selected_cols = ['MACD_12_26_9', 'MACDS_12_26_9', 'MACDH_12_26_9', 'ATR_14', 'RSI_14', 'STOCHk_14_3_3', 'EMA_9'] # Added EMA_9
+    print("\n--- DEBUG: ORMCR Analysis DataFrame Tail for Critical Indicators after pandas_ta calculation ---")
+    selected_cols = ['MACD_12_26_9', 'MACDS_12_26_9', 'MACDH_12_26_9', 'ATR_14', 'RSI_14', 'STOCHk_14_3_3', 'EMA_9']
     existing_cols = [col for col in selected_cols if col in df_copy.columns]
     if existing_cols:
-        tail_data = df_copy[existing_cols].tail(20) # Show last 20 rows
+        tail_data = df_copy[existing_cols].tail(20)
         print(tail_data)
         if tail_data.iloc[-1].isnull().any():
-            print("WARNING: Last row of selected indicators contains NaN values.")
+            print("WARNING: ORMCR Analysis Last row of selected indicators contains NaN values.")
     else:
-        print("No selected indicator columns found in DataFrame after calculation.")
+        print("No selected indicator columns found in ORMCR Analysis DataFrame after calculation.")
     print("------------------------------------------------------------------")
     # --- END DEBUG PRINT ---
 
@@ -340,10 +356,9 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
     risk_in_points = "N/A"
     position_size_suggestion = "User to calculate"
     
-    calculated_confidence_score = 0 # Start with 0 confidence
+    calculated_confidence_score = 0
     calculated_signal_strength = "NEUTRAL"
 
-    # Sort timeframes from highest to lowest for top-down analysis
     sorted_timeframes = sorted(analysis_data.keys(), key=lambda x: int(BYBIT_INTERVAL_MAP.get(x, {"interval": "0"}).get("interval")) if BYBIT_INTERVAL_MAP[x]["interval"].isdigit() else 999999, reverse=True)
 
     print(f"\n--- Starting ORMCR Logic ---")
@@ -383,7 +398,6 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
         }
         print(f"  {tf} Trend Analysis: {trend_analysis[tf]}")
     
-    # Determine overall bias from higher timeframes (prioritizing D1, then H4, H1)
     for tf in ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]:
         if tf in trend_analysis and trend_analysis[tf]["trend"] != "Neutral":
             overall_bias = trend_analysis[tf]["trend"].upper()
@@ -391,7 +405,6 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
             break
     print(f"Final Overall Bias: {overall_bias}")
 
-    # Confirmation (focus on lowest timeframe for entry)
     lowest_tf = sorted_timeframes[-1] if sorted_timeframes else None
     print(f"Lowest Timeframe for Confirmation: {lowest_tf}")
 
@@ -405,15 +418,14 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
         macd_lowest = get_indicator_value(df_lowest, 'MACD_12_26_9')
         macds_lowest = get_indicator_value(df_lowest, 'MACDS_12_26_9')
         stoch_k_lowest = get_indicator_value(df_lowest, 'STOCHk_14_3_3')
-        stoch_d_lowest = get_indicator_value(df_lowest, 'STOCHd_14_3_3') # Added Stochastic D
-        atr_lowest = get_indicator_value(df_lowest, 'ATR_14') # Added ATR
+        stoch_d_lowest = get_indicator_value(df_lowest, 'STOCHd_14_3_3')
+        atr_lowest = get_indicator_value(df_lowest, 'ATR_14')
 
         print(f"  Lowest TF ({lowest_tf}) Indicator Values:")
         print(f"    Last Close: {last_close_lowest}, Prev Close: {prev_close_lowest}")
         print(f"    EMA9: {ema9_lowest}, RSI: {rsi_lowest}")
         print(f"    MACD: {macd_lowest}, MACDS: {macds_lowest}, STOCH_K: {stoch_k_lowest}, STOCH_D: {stoch_d_lowest}, ATR: {atr_lowest}")
 
-        # Core conditions for ORMCR logic
         conditions = []
         confirmation_details = []
 
@@ -467,7 +479,6 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
 
         # Condition 4: MACD Crossover / Momentum - only if MACD is selected
         if "MACD" in selected_indicators_from_frontend and isinstance(macd_lowest, (int, float)):
-            # Prefer MACD crossover (MACD vs MACDS)
             if isinstance(macds_lowest, (int, float)):
                 if overall_bias == "BULLISH" and macd_lowest > macds_lowest:
                     conditions.append(True)
@@ -478,19 +489,18 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
                 else:
                     conditions.append(False)
                     confirmation_details.append("MACD is not confirming direction (crossover).")
-            # Fallback if MACDS is N/A: check MACD Histogram direction for momentum
             elif isinstance(macd_hist, (int, float)): 
                 if overall_bias == "BULLISH" and macd_lowest > 0 and macd_hist > 0:
-                    conditions.append(True) # Treat as a positive confirmation
+                    conditions.append(True)
                     confirmation_details.append("MACD positive with bullish histogram (MACDS N/A).")
                 elif overall_bias == "BEARISH" and macd_lowest < 0 and macd_hist < 0:
-                    conditions.append(True) # Treat as a positive confirmation
+                    conditions.append(True)
                     confirmation_details.append("MACD negative with bearish histogram (MACDS N/A).")
                 else:
                     conditions.append(False)
                     confirmation_details.append("MACD not confirming direction (histogram).")
             else:
-                conditions.append(False) # MACD and MACDH also N/A
+                conditions.append(False)
                 confirmation_details.append("MACD indicator data missing.")
         elif "MACD" in selected_indicators_from_frontend:
             conditions.append(False)
@@ -499,7 +509,7 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
 
         # Condition 5: Stochastic Oscillator (not overbought/oversold) - only if Stochastic is selected
         if "Stochastic Oscillator" in selected_indicators_from_frontend and isinstance(stoch_k_lowest, (int, float)):
-            if stoch_k_lowest > 20 and stoch_k_lowest < 80: # General mid-range for confirmation
+            if stoch_k_lowest > 20 and stoch_k_lowest < 80:
                 conditions.append(True)
                 confirmation_details.append("Stochastic is in mid-range (20-80).")
             else:
@@ -509,19 +519,16 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
             conditions.append(False)
             confirmation_details.append("Stochastic data missing.")
             
-        # Calculate confidence based on met conditions
         total_relevant_conditions = len(conditions)
-        met_conditions_count = sum(conditions) # Sum of True (1) and False (0)
+        met_conditions_count = sum(conditions)
 
         if total_relevant_conditions > 0:
             calculated_confidence_score = int((met_conditions_count / total_relevant_conditions) * 100)
-        else: # If no relevant ORMCR conditions were selected or had data
-            calculated_confidence_score = 50 # Default if no specific ORMCR conditions apply
+        else:
+            calculated_confidence_score = 50
             confirmation_details.append("No relevant ORMCR indicators available or selected for confirmation.")
 
-
-        # Determine Signal Strength based on calculated confidence and overall bias
-        if calculated_confidence_score < 40: # Low confidence, regardless of bias
+        if calculated_confidence_score < 40:
             calculated_signal_strength = "NEUTRAL"
             entry_suggestion = "MONITOR"
             confirmation_status = "PENDING"
@@ -551,31 +558,27 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
                 calculated_signal_strength = "MONITOR"
                 entry_suggestion = "MONITOR"
                 confirmation_status = "PENDING"
-        else: # Overall bias is NEUTRAL
+        else:
             calculated_signal_strength = "NEUTRAL"
             entry_suggestion = "MONITOR"
             confirmation_status = "PENDING"
 
-        # Update confirmation_reason to reflect all conditions considered
         confirmation_reason = ". ".join(confirmation_details)
         if not confirmation_reason.endswith('.'):
             confirmation_reason += '.'
 
-        # Mock SL/TP based on a simple percentage of current price if confirmed
         if entry_suggestion == "ENTER NOW" and isinstance(last_close_lowest, (int, float)):
             if overall_bias == "BULLISH":
-                sl_price = round(last_close_lowest * 0.995, 2) # 0.5% SL
-                tp1_price = round(last_close_lowest * 1.01, 2) # 1% TP1
-                tp2_price = round(last_close_lowest * 1.02, 2) # 2% TP2
+                sl_price = round(last_close_lowest * 0.995, 2)
+                tp1_price = round(last_close_lowest * 1.01, 2)
+                tp2_price = round(last_close_lowest * 1.02, 2)
                 risk_in_points = round(last_close_lowest - sl_price, 2)
             elif overall_bias == "BEARISH":
-                sl_price = round(last_close_lowest * 1.005, 2) # 0.5% SL
-                tp1_price = round(last_close_lowest * 0.99, 2) # 1% TP1
-                tp2_price = round(last_close_lowest * 0.98, 2) # 2% TP2
-                risk_in_points = round(sl_price - last_close_lowest, 2)
-                # Ensure risk_in_points is positive for bearish trades
+                sl_price = round(last_close_lowest * 1.005, 2)
+                tp1_price = round(last_close_lowest * 0.99, 2)
+                tp2_price = round(last_close_lowest * 0.98, 2)
                 risk_in_points = round(sl_price - last_close_lowest, 2) if sl_price > last_close_lowest else round(last_close_lowest - sl_price, 2)
-            position_size_suggestion = "2.5% of balance (example)" # Placeholder
+            position_size_suggestion = "2.5% of balance (example)"
         else:
             sl_price = "N/A"
             tp1_price = "N/A"
@@ -589,7 +592,7 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
         print(f"  Confirmation Status: {confirmation_status}, Reason: {confirmation_reason}")
     else:
         confirmation_reason = "Not enough data for lowest timeframe confirmation or lowest timeframe not selected."
-        calculated_confidence_score = 30 # Low confidence if no lowest TF data
+        calculated_confidence_score = 30
         print(f"  Confirmation Reason: {confirmation_reason}")
         
     print(f"--- ORMCR Logic Finished ---")
@@ -605,9 +608,9 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
         "tp2_price": tp2_price,
         "risk_in_points": risk_in_points,
         "position_size_suggestion": position_size_suggestion,
-        "calculated_confidence_score": calculated_confidence_score, # New
-        "calculated_signal_strength": calculated_signal_strength,   # New
-        "trend_analysis_by_tf": {tf: {k: v for k, v in data.items() if k != 'df'} for tf, data in analysis_data.items()} # Exclude DataFrame
+        "calculated_confidence_score": calculated_confidence_score,
+        "calculated_signal_strength": calculated_signal_strength,
+        "trend_analysis_by_tf": {tf: {k: v for k, v in data.items() if k != 'df'} for tf, data in analysis_data.items()}
     }
 
 @app.route('/run_ormcr_analysis', methods=['POST'])
@@ -619,41 +622,36 @@ def run_ormcr_analysis():
 
     data = request.json
     currency_pair = data.get('currencyPair')
-    timeframes = data.get('timeframes', []) # Now expects a list
+    timeframes = data.get('timeframes', [])
     trade_type = data.get('tradeType')
-    indicators = data.get('indicators', []) # This list is passed to apply_ormcr_logic
+    indicators = data.get('indicators', [])
     available_balance = data.get('availableBalance')
     leverage = data.get('leverage')
 
     if not currency_pair or not timeframes:
         return jsonify({"error": "Currency pair and at least one timeframe are required"}), 400
 
-    # Ensure timeframes are valid and sorted for top-down analysis
     valid_timeframes = [tf for tf in timeframes if tf in BYBIT_INTERVAL_MAP]
     if not valid_timeframes:
         return jsonify({"error": "No valid timeframes provided"}), 400
     
-    # Sort timeframes from highest to lowest for top-down analysis based on interval value
     valid_timeframes.sort(key=lambda x: int(BYBIT_INTERVAL_MAP[x]["interval"]) if BYBIT_INTERVAL_MAP[x]["interval"].isdigit() else 999999, reverse=True)
 
 
     analysis_data_by_tf = {}
-    bybit_symbol = currency_pair.replace('/', '') + 'T' # Convert BTC/USD to BTCUSDT
+    bybit_symbol = currency_pair.replace('/', '') + 'T'
 
-    # Step 1: Fetch real OHLCV data for each selected timeframe
     for tf in valid_timeframes:
         df = fetch_real_ohlcv(bybit_symbol, tf)
         
         if df.empty:
             print(f"Skipping {tf} due to empty DataFrame after fetching real data.")
-            continue # Skip this timeframe if no data was fetched
+            continue
 
         df_with_indicators = calculate_indicators_for_df(df, indicators)
         
-        # Ensure last_price and volume are floats and handle potential NaNs
-        # Use iloc[-1] because DataFrame is now oldest to newest
-        last_price_val = get_indicator_value(df_with_indicators, 'close') # Most recent close
-        volume_val = get_indicator_value(df_with_indicators, 'volume') # Most recent volume
+        last_price_val = get_indicator_value(df_with_indicators, 'close')
+        volume_val = get_indicator_value(df_with_indicators, 'volume')
 
 
         analysis_data_by_tf[tf] = {
@@ -661,33 +659,26 @@ def run_ormcr_analysis():
             "last_price": last_price_val,
             "volume": volume_val
         }
-        # Add a small delay between fetching data for different timeframes
-        time.sleep(0.2) # 200 ms delay to avoid rate limiting for multi-timeframe requests
+        time.sleep(0.2)
 
     if not analysis_data_by_tf:
         return jsonify({"error": "No valid market data could be fetched for analysis. Please check currency pair and timeframes."}), 500
 
 
-    # Step 2: Apply ORMCR logic
-    # Pass the indicators selected by the user to the logic function
     ormcr_results = apply_ormcr_logic(analysis_data_by_tf, indicators)
 
-    # Step 3: Construct prompt for Gemini
-    # Ensure all numerical values in detailed_timeframe_data are properly converted
     detailed_tf_data_for_prompt = {}
     for tf, data in analysis_data_by_tf.items():
         indicators_snapshot_dict = {}
-        # List all possible pandas_ta indicator column names
         indicator_cols = [
             'RSI_14', 'MACD_12_26_9', 'MACDH_12_26_9', 'MACDS_12_26_9',
             'EMA_9', 'SMA_20', 'EMA_50',
-            'BBL_5_2.0', 'BBM_5_2.0', 'BBU_5_2.0', # Bollinger Bands
-            'STOCHk_14_3_3', 'STOCHd_14_3_3', # Stochastic
-            'ATR_14', # ATR
-            'volume' # Volume is also a numeric column
+            'BBL_5_2.0', 'BBM_5_2.0', 'BBU_5_2.0',
+            'STOCHk_14_3_3', 'STOCHd_14_3_3',
+            'ATR_14',
+            'volume'
         ]
         for ind_col in indicator_cols:
-            # Use the improved get_indicator_value here as well
             indicators_snapshot_dict[ind_col] = get_indicator_value(data["df"], ind_col)
         
         detailed_tf_data_for_prompt[tf] = {
@@ -696,7 +687,6 @@ def run_ormcr_analysis():
             "indicators_snapshot": indicators_snapshot_dict
         }
     
-    # Debugging print for indicators_snapshot_dict before sending to Gemini
     print(f"\n--- Indicators Snapshot before sending to Gemini ---")
     print(json.dumps(detailed_tf_data_for_prompt, indent=2))
     print("-" * 40)
@@ -751,7 +741,6 @@ def run_ormcr_analysis():
     ]
 
     try:
-        # Use response_schema for structured output
         response = gemini_model.generate_content(
             prompt_parts,
             generation_config={
@@ -791,7 +780,7 @@ def run_ormcr_analysis():
                                 "percentage_change": {"type": "STRING"}
                             }
                         },
-                        "technical_indicators_analysis": {"type": "STRING"}, # Changed to STRING
+                        "technical_indicators_analysis": {"type": "STRING"},
                         "next_step_for_user": {"type": "STRING"}
                     },
                     "required": ["confidence_score", "signal_strength", "market_summary", "ai_suggestion", "stop_loss", "take_profit_1", "take_profit_2", "technical_indicators_analysis", "next_step_for_user"]
@@ -799,15 +788,12 @@ def run_ormcr_analysis():
             }
         )
         
-        # Parse the JSON string response
         ai_analysis_results = json.loads(response.candidates[0].content.parts[0].text)
 
-        # Add ORMCR specific flags for frontend to interpret
         ai_analysis_results['ormcr_confirmation_status'] = ormcr_results['confirmation_status']
         ai_analysis_results['ormcr_overall_bias'] = ormcr_results['overall_bias']
         ai_analysis_results['ormcr_reason'] = ormcr_results['confirmation_reason']
 
-        # If confirmation is pending, ensure SL/TP are N/A in the final response to frontend
         if ai_analysis_results['ormcr_confirmation_status'] == "PENDING":
             ai_analysis_results['stop_loss']['price'] = "N/A"
             ai_analysis_results['stop_loss']['percentage_change'] = "N/A"
@@ -821,7 +807,7 @@ def run_ormcr_analysis():
 
     except Exception as e:
         print(f"Error generating ORMCR analysis with Gemini: {e}")
-        traceback.print_exc() # Print full traceback
+        traceback.print_exc()
         return jsonify({"error": f"Failed to get AI analysis: {e}"}), 500
 
 
