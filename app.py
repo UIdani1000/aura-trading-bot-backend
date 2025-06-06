@@ -17,6 +17,10 @@ import traceback
 load_dotenv()
 
 app = Flask(__name__)
+# Configure CORS to allow requests from your Vercel frontend.
+# For now, allowing all origins is easiest for debugging.
+# For production, consider being more specific:
+# CORS(app, origins=["https://aura-trading-bot-frontend.vercel.app", "http://localhost:3000"])
 CORS(app)
 
 # --- Configuration ---
@@ -46,6 +50,13 @@ try:
 except Exception as e:
     gemini_model = None
     print(f"--- Failed to initialize Gemini model: {e} ---")
+
+# --- Health Check / Root Route (ADDED FOR RENDER) ---
+# Render expects a successful response from the root route to consider the service "live".
+@app.route('/')
+def home():
+    """A basic health check endpoint for Render deployment."""
+    return "Aura Trading Bot Backend is running!", 200
 
 # --- Helper Functions ---
 
@@ -274,7 +285,7 @@ def chat():
     context_prefix = f"""
     You are Aura, an AI trading assistant. Your goal is to provide insightful, helpful, and **friendly** responses to the user's trading-related questions.
     Adopt a **conversational, approachable, and encouraging tone**. Avoid overly formal or robotic language.
-    You can use emojis if appropriate to convey friendliness (e.g., 😊📈).
+    You can use emojis if appropriate to convey friendliness (e.g., 👋😊).
 
     Here is the current live market data:
     {json.dumps(market_data, indent=2)}
@@ -959,7 +970,7 @@ def run_ormcr_analysis():
     prompt_parts = [
         "You are Aura, an advanced AI trading assistant specializing in the ORMCR strategy.",
         "Your goal is to provide insightful, helpful, and **friendly** analysis results. Adopt a **conversational, approachable, and encouraging tone**. Avoid overly formal or robotic language.",
-        "You can use emojis if appropriate to convey friendliness (e.g., 😊📈).",
+        "You can use emojis if appropriate to convey friendliness (e.g., 👋😊).",
         "The user has requested an analysis for:",
         f"- Currency Pair: {currency_pair}",
         f"- Selected Timeframes (highest to lowest): {', '.join(valid_timeframes)}",
@@ -1006,7 +1017,7 @@ def run_ormcr_analysis():
         f"- For stop_loss and take_profit, use the calculated 'sl_price', 'tp1_price', 'tp2_price' and their corresponding 'sl_percent_change', 'tp1_percent_change', 'tp2_percent_change' from 'ormcr_analysis'. If these are 'N/A', represent them as 'N/A'.",
         f"- If 'ormcr_confirmation_status' is 'PENDING', ensure 'entry_type' is 'WAIT' and 'recommended_action' is 'MONITOR', and provide 'N/A' for SL/TP prices and percentages.",
         f"- Ensure 'market_summary' and 'next_step_for_user' are coherent and actionable based on the analysis.",
-        "\n**IMPORTANT: Maintain a friendly, conversational, and encouraging tone throughout your response. Use simple, clear language and feel free to include relevant emojis to enhance friendliness (e.g., 😊📈).**"
+        "\n**IMPORTANT: Maintain a friendly, conversational, and encouraging tone throughout your response. Use simple, clear language and feel free to include relevant emojis to enhance friendliness (e.g., 👋😊).**"
     ]
 
     try:
@@ -1085,4 +1096,6 @@ def run_ormcr_analysis():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=os.environ.get('PORT', 10000), debug=False)
+    # This block is primarily for local development.
+    # For Render deployment, Gunicorn will handle starting the Flask application.
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), debug=False)
