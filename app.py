@@ -235,19 +235,43 @@ def chat():
     if not gemini_model:
         return jsonify({"error": "Gemini model not initialized"}), 500
 
-    user_message = request.json.get('message')
-    if not user_message:
-        return jsonify({"error": "No message provided"}), 400
+    user_message_data = request.json.get('message')
+    # The frontend is expected to send the entire chat history in `message` under a `parts` key
+    # For now, we assume user_message_data is the full history if it's a list, otherwise just the last message
+    
+    # Original logic was expecting a simple string, but the prompt now expects a structured history.
+    # We will adjust to correctly send the full history from frontend, so backend receives correct structure.
+    chat_history_from_frontend = request.json.get('chatHistory', [])
+    latest_user_message = user_message_data # Assuming message still carries the last user input directly if chatHistory is provided separately
+
+    # Construct the full chat history for Gemini including prior turns
+    gemini_chat_history = []
+    for chat_turn in chat_history_from_frontend:
+        gemini_chat_history.append({'role': chat_turn['role'], 'parts': [{'text': chat_turn['text']}]})
+
+    # Add the current user message (which should be the last one in the chat_history_from_frontend)
+    # Or if frontend sends only the new message as 'message' field
+    if not chat_history_from_frontend and latest_user_message: # If frontend sends only latest message, treat it as single turn
+         gemini_chat_history.append({'role': 'user', 'parts': [{'text': latest_user_message}]})
+    elif chat_history_from_frontend and latest_user_message: # If frontend sends full history, last part is the latest user message
+        # Ensure the last message in gemini_chat_history is indeed the latest user message
+        if gemini_chat_history and gemini_chat_history[-1]['role'] == 'user' and gemini_chat_history[-1]['parts'][0]['text'] == latest_user_message:
+            pass # Already correctly added by iterating chat_history_from_frontend
+        else:
+             gemini_chat_history.append({'role': 'user', 'parts': [{'text': latest_user_message}]})
+
 
     # Fetch live market data for context
     market_data_response = get_all_market_prices()
     market_data = market_data_response.json
 
-    # Fetch mock trade history for context
-    trade_history = get_trades().json
+    # Trade history will now be managed on frontend, so we don't fetch it from local file
+    # For now, provide empty trade history, or fetch from a mock source if needed for LLM context,
+    # but the frontend will be responsible for displaying its own persistent trade history.
+    mock_trade_history = [] # Frontend handles persistence. Backend won't know trade history unless explicitly sent.
 
-    # Construct context for Gemini
-    context = f"""
+    # Construct overall context for Gemini
+    context_prefix = f"""
     You are Aura, an AI trading assistant. Your goal is to provide insightful, helpful, and **friendly** responses to the user's trading-related questions.
     Adopt a **conversational, approachable, and encouraging tone**. Avoid overly formal or robotic language.
     You can use emojis if appropriate to convey friendliness (e.g., 😊📈).
@@ -255,14 +279,38 @@ def chat():
     Here is the current live market data:
     {json.dumps(market_data, indent=2)}
 
-    Here is the user's recent trade history:
-    {json.dumps(trade_history, indent=2)}
-
-    User's question: {user_message}
+    (Note: Trade history is now managed by the user on the frontend, so it's not provided in real-time here for chat context.)
     """
 
+    # Prepend context to the first user message, or handle as a system instruction
+    # For Gemini API, best practice is to structure as alternating roles.
+    # The first message from the user often acts as the initial prompt/context.
+    if gemini_chat_history:
+        # If there's already a conversation, add system instruction at the start of the first user turn.
+        # This approach ensures the context is always present without being a separate AI turn.
+        if gemini_chat_history[0]['role'] == 'user':
+            gemini_chat_history[0]['parts'][0]['text'] = context_prefix + "\n" + gemini_chat_history[0]['parts'][0]['text']
+        else: # If conversation starts with model, something is off, but prepend to first user turn when it appears
+             found_user_turn = False
+             for turn in gemini_chat_history:
+                 if turn['role'] == 'user':
+                     turn['parts'][0]['text'] = context_prefix + "\n" + turn['parts'][0]['text']
+                     found_user_turn = True
+                     break
+             if not found_user_turn: # Fallback if only AI messages in history
+                 gemini_chat_history = [{'role': 'user', 'parts': [{'text': context_prefix + "\n" + latest_user_message}]}] + gemini_chat_history
+    else: # If it's a brand new conversation
+        gemini_chat_history.append({'role': 'user', 'parts': [{'text': context_prefix + "\n" + latest_user_message}]})
+
+
     try:
-        response = gemini_model.generate_content(context)
+        # Debugging the chat history sent to Gemini
+        print("\n--- DEBUG: Chat history sent to Gemini API ---")
+        for entry in gemini_chat_history:
+            print(f"Role: {entry['role']}, Text: {entry['parts'][0]['text'][:200]}...") # Print first 200 chars
+        print("----------------------------------------------")
+
+        response = gemini_model.generate_content(gemini_chat_history)
         ai_response = response.candidates[0].content.parts[0].text
         return jsonify({"response": ai_response})
     except Exception as e:
@@ -270,39 +318,13 @@ def chat():
         traceback.print_exc()
         return jsonify({"error": f"Failed to get AI response: {e}"}), 500
 
-# --- Trade Log Endpoints (Existing - using local JSON file) ---
-TRADE_LOG_FILE = 'trades.json'
+# --- Removed Trade Log Endpoints (now handled by frontend Firestore) ---
+# TRADE_LOG_FILE = 'trades.json'
+# def load_trades(): ...
+# def save_trades(trades): ...
+# @app.route('/log_trade', methods=['POST']) ...
+# @app.route('/get_trades', methods=['GET']) ...
 
-def load_trades():
-    if os.path.exists(TRADE_LOG_FILE):
-        with open(TRADE_LOG_FILE, 'r') as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return []
-    return []
-
-def save_trades(trades):
-    with open(TRADE_LOG_FILE, 'w') as f:
-        json.dump(trades, f, indent=4)
-
-@app.route('/log_trade', methods=['POST'])
-def log_trade():
-    trade_data = request.json
-    if not trade_data:
-        return jsonify({"error": "No trade data provided"}), 400
-
-    trades = load_trades()
-    trade_data['id'] = len(trades) + 1
-    trade_data['timestamp'] = datetime.now().isoformat()
-    trades.append(trade_data)
-    save_trades(trades)
-    return jsonify({"message": "Trade logged successfully!", "trade": trade_data}), 201
-
-@app.route('/get_trades', methods=['GET'])
-def get_trades():
-    trades = load_trades()
-    return jsonify(trades)
 
 # --- ORMCR Analysis Endpoint ---
 
@@ -463,7 +485,7 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
 
         tf_trend = "Neutral"
         # Trend based on Price vs EMA9 and previous candle vs EMA9
-        if isinstance(ema9, (int, float)) and isinstance(last_close, (int, float)) and 'EMA_9' in df.columns:
+        if "Moving Averages" in selected_indicators_from_frontend and isinstance(ema9, (int, float)) and isinstance(last_close, (int, float)) and 'EMA_9' in df.columns:
             # Check previous EMA9 and close for trend confirmation
             if len(df) > 1 and not pd.isna(df['EMA_9'].iloc[-2]) and not pd.isna(df['close'].iloc[-2]):
                 prev_ema9 = df['EMA_9'].iloc[-2]
@@ -477,6 +499,8 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
                 tf_trend = "Uptrend (weak)"
             elif last_close < ema9:
                 tf_trend = "Downtrend (weak)"
+        else:
+            tf_trend = "Neutral (EMA9 data not available or not selected)"
 
         trend_analysis[tf] = {
             "trend": tf_trend,
@@ -489,7 +513,7 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
     
     # Determine overall_bias from highest available timeframe with a determined trend
     for tf_key in ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]: # Ordered from highest to lowest
-        if tf_key in trend_analysis and trend_analysis[tf_key]["trend"] not in ["Neutral", "No sufficient data", "Uptrend (weak)", "Downtrend (weak)"]:
+        if tf_key in trend_analysis and trend_analysis[tf_key]["trend"] not in ["Neutral", "No sufficient data", "Uptrend (weak)", "Downtrend (weak)", "Neutral (EMA9 data not available or not selected)"]:
             overall_bias = trend_analysis[tf_key]["trend"].upper()
             print(f"  Overall Bias determined from {tf_key}: {overall_bias}")
             break
@@ -640,6 +664,49 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
             
         elif "Stochastic Oscillator" in selected_indicators_from_frontend:
             confirmation_details.append("Stochastic: Data missing or not selected.")
+
+        # Condition 6: Bollinger Bands - only if Bollinger Bands is selected
+        if "Bollinger Bands" in selected_indicators_from_frontend:
+            bb_upper = get_indicator_value(df_lowest, 'BBU_5_2.0')
+            bb_lower = get_indicator_value(df_lowest, 'BBL_5_2.0')
+            if isinstance(bb_upper, (int, float)) and isinstance(bb_lower, (int, float)) and isinstance(last_close_lowest, (int, float)):
+                total_relevant_indicators += 1
+                # Price breaking upper band (bullish) or lower band (bearish)
+                if last_close_lowest > bb_upper:
+                    directional_signals_count += 1
+                    confirmation_details.append("Bollinger Bands: Price broke above Upper Band (strong bullish move).")
+                elif last_close_lowest < bb_lower:
+                    directional_signals_count += 1
+                    confirmation_details.append("Bollinger Bands: Price broke below Lower Band (strong bearish move).")
+                else:
+                    confirmation_details.append("Bollinger Bands: Price within bands (neutral/ranging).")
+            else:
+                confirmation_details.append("Bollinger Bands: Data missing or not selected.")
+
+        # Condition 7: Volume - only if Volume is selected
+        if "Volume" in selected_indicators_from_frontend:
+            volume_val = get_indicator_value(df_lowest, 'volume')
+            if isinstance(volume_val, (int, float)) and volume_val > 0:
+                # Compare to average volume or previous candle's volume
+                # For simplicity, let's just check if it's high relative to recent average (mocked or actual calc)
+                # Actual implementation would compare to SMA of volume or look for spikes.
+                # For now, let's just count it as a signal if it's above a simple average (e.g., last 5 candles)
+                if len(df_lowest) >= 5 and 'volume' in df_lowest.columns:
+                    recent_avg_volume = df_lowest['volume'].iloc[-5:-1].mean()
+                    if volume_val > recent_avg_volume * 1.5: # 50% above recent average
+                        directional_signals_count += 1
+                        confirmation_details.append(f"Volume: Significant increase ({volume_val} > 1.5x average).")
+                    elif volume_val < recent_avg_volume * 0.5: # 50% below recent average
+                        directional_signals_count += 1
+                        confirmation_details.append(f"Volume: Significant decrease ({volume_val} < 0.5x average).")
+                    else:
+                        confirmation_details.append("Volume: Normal levels.")
+                else:
+                    confirmation_details.append("Volume: Insufficient data for comparative analysis.")
+            else:
+                confirmation_details.append("Volume: Data missing or not selected.")
+        elif "Volume" in selected_indicators_from_frontend:
+            confirmation_details.append("Volume: Indicator not selected or data not available.")
         
         # Calculate confidence score based on number of directional signals
         if total_relevant_indicators > 0:
@@ -656,8 +723,8 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
         if overall_bias == "NEUTRAL":
             if calculated_confidence_score >= 60: # If high confidence of ANY direction on lowest TF despite neutral overall bias
                 # Check for majority bullish/bearish details for a cautious signal
-                num_bullish_details = sum(1 for detail in confirmation_details if "bullish" in detail.lower() or "overbought" in detail.lower())
-                num_bearish_details = sum(1 for detail in confirmation_details if "bearish" in detail.lower() or "oversold" in detail.lower())
+                num_bullish_details = sum(1 for detail in confirmation_details if "bullish" in detail.lower() or "overbought" in detail.lower() or "above EMA9" in detail)
+                num_bearish_details = sum(1 for detail in confirmation_details if "bearish" in detail.lower() or "oversold" in detail.lower() or "below EMA9" in detail)
 
                 if num_bullish_details > num_bearish_details:
                     calculated_signal_strength = "CAUTIOUS BUY"
@@ -679,7 +746,7 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
             calculated_signal_strength = "NEUTRAL"
             entry_suggestion = "MONITOR"
             confirmation_status = "PENDING"
-        elif overall_bias == "BULLISH":
+        elif overall_bias == "UPTREND":
             if calculated_confidence_score >= 80:
                 calculated_signal_strength = "STRONG BUY"
                 entry_suggestion = "ENTER NOW"
@@ -692,7 +759,7 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
                 calculated_signal_strength = "MONITOR" # Even with bullish bias, if confidence is low, still monitor
                 entry_suggestion = "MONITOR"
                 confirmation_status = "PENDING"
-        elif overall_bias == "BEARISH":
+        elif overall_bias == "DOWNTREND":
             if calculated_confidence_score >= 80:
                 calculated_signal_strength = "STRONG SELL"
                 entry_suggestion = "ENTER NOW"
@@ -937,7 +1004,8 @@ def run_ormcr_analysis():
         f"- The 'signal_strength' should be '{ormcr_results['calculated_signal_strength']}' based on the backend's calculation.",
         f"- The 'entry_type' and 'recommended_action' in 'ai_suggestion' should directly map to '{ormcr_results['entry_suggestion']}'.",
         f"- For stop_loss and take_profit, use the calculated 'sl_price', 'tp1_price', 'tp2_price' and their corresponding 'sl_percent_change', 'tp1_percent_change', 'tp2_percent_change' from 'ormcr_analysis'. If these are 'N/A', represent them as 'N/A'.",
-        f"- If 'ormcr_confirmation_status' is 'PENDING', ensure 'entry_type' is 'WAIT' and 'recommended_action' is 'MONITOR', and explain why in 'market_summary' and 'next_step_for_user'. Also, if 'ormcr_confirmation_status' is 'PENDING', provide 'N/A' for SL/TP prices and percentages.",
+        f"- If 'ormcr_confirmation_status' is 'PENDING', ensure 'entry_type' is 'WAIT' and 'recommended_action' is 'MONITOR', and provide 'N/A' for SL/TP prices and percentages.",
+        f"- Ensure 'market_summary' and 'next_step_for_user' are coherent and actionable based on the analysis.",
         "\n**IMPORTANT: Maintain a friendly, conversational, and encouraging tone throughout your response. Use simple, clear language and feel free to include relevant emojis to enhance friendliness (e.g., 😊📈).**"
     ]
 
