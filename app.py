@@ -161,23 +161,24 @@ def get_all_market_prices():
                 stoch_k_val = get_indicator_value(df, 'STOCHk_14_3_3', default_val="N/A") # This was missing
 
                 # Condition for MACD (prioritize MACDs, then MACDh)
-                macd_condition_met = False
+                macd_is_bullish = False
+                macd_is_bearish = False
                 if isinstance(macd_val, (int, float)): # Check if MACD main line is numeric
                     if isinstance(macds_val, (int, float)): # Prefer MACD Signal Line for crossover
                         if macd_val > macds_val: # Bullish crossover
-                            macd_condition_met = True
+                            macd_is_bullish = True
                             print(f"DEBUG: MACD Signal Line (MACDs) indicates bullish momentum (MACD > MACDs).")
                         elif macd_val < macds_val: # Bearish crossover
-                            macd_condition_met = True
+                            macd_is_bearish = True
                             print(f"DEBUG: MACD Signal Line (MACDs) indicates bearish momentum (MACD < MACDs).")
                         else:
                             print(f"DEBUG: MACD Signal Line (MACDs) not confirming direction.")
                     elif isinstance(macdh_val, (int, float)): # Fallback to MACD Histogram if MACDs is not available or is N/A
                         if macdh_val > 0: # Bullish: Histogram above 0
-                            macd_condition_met = True
+                            macd_is_bullish = True
                             print(f"DEBUG: MACD Histogram (MACDh) indicates bullish momentum (MACDs not available).")
                         elif macdh_val < 0: # Bearish: Histogram below 0
-                            macd_condition_met = True
+                            macd_is_bearish = True
                             print(f"DEBUG: MACD Histogram (MACDh) indicates bearish momentum (MACDs not available).")
                         else:
                             print(f"DEBUG: MACD Histogram (MACDh) not confirming direction (MACDs not available).")
@@ -188,17 +189,10 @@ def get_all_market_prices():
 
 
                 # Final ORSCR signal determination for dashboard - simplified to not use overall_bias
-                if isinstance(rsi_val, (int, float)) and macd_condition_met:
-                    # Determine current trend direction based on RSI and MACD (simplified for dashboard)
-                    if rsi_val > 60 and (
-                        (isinstance(macd_val, (int, float)) and isinstance(macds_val, (int, float)) and macd_val > macds_val) or
-                        (isinstance(macdh_val, (int, float)) and macdh_val > 0)
-                    ):
+                if isinstance(rsi_val, (int, float)):
+                    if rsi_val > 60 and macd_is_bullish:
                         orscr_signal = "BUY"
-                    elif rsi_val < 40 and (
-                        (isinstance(macd_val, (int, float)) and isinstance(macds_val, (int, float)) and macd_val < macds_val) or
-                        (isinstance(macdh_val, (int, float)) and macdh_val < 0)
-                    ):
+                    elif rsi_val < 40 and macd_is_bearish:
                         orscr_signal = "SELL"
                     else:
                          orscr_signal = "NEUTRAL"
@@ -426,29 +420,40 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
     """
     overall_bias = "NEUTRAL"
     confirmation_status = "PENDING"
-    confirmation_reason = "Initial analysis."
+    # Initial confirmation reason will be replaced if specific conditions are met
+    confirmation_reason = "Initial analysis." 
     entry_suggestion = "MONITOR"
     sl_price = "N/A"
     tp1_price = "N/A"
     tp2_price = "N/A"
     risk_in_points = "N/A"
     position_size_suggestion = "User to calculate"
+    sl_percent_change = "N/A"
+    tp1_percent_change = "N/A"
+    tp2_percent_change = "N/A"
     
     calculated_confidence_score = 0
     calculated_signal_strength = "NEUTRAL"
 
+    # Sort timeframes from highest to lowest (e.g., D1, H4, H1, M30, M15, M5, M1)
+    # This ensures overall_bias is determined by the highest available timeframe first
     sorted_timeframes = sorted(analysis_data.keys(), key=lambda x: int(BYBIT_INTERVAL_MAP.get(x, {"interval": "0"}).get("interval")) if BYBIT_INTERVAL_MAP[x]["interval"].isdigit() else 999999, reverse=True)
+    
+    # Ensure smallest timeframe is available for ORMCR lowest TF specific logic
+    lowest_tf_key_for_calc = sorted_timeframes[-1] if sorted_timeframes else None
 
     print(f"\n--- Starting ORMCR Logic ---")
     print(f"Sorted Timeframes: {sorted_timeframes}")
+    print(f"Lowest Timeframe for Calc: {lowest_tf_key_for_calc}")
     print(f"Selected Indicators from Frontend: {selected_indicators_from_frontend}")
 
     trend_analysis = {}
     for tf in sorted_timeframes:
         df = analysis_data[tf]['df']
-        if df.empty:
-            trend_analysis[tf] = "No data for analysis."
-            print(f"  {tf}: No data for analysis.")
+        # Need at least 2 candles for trend comparison for EMA9 logic
+        if df.empty or len(df) < 2: 
+            trend_analysis[tf] = {"trend": "No sufficient data", "last_close": "N/A", "ema9": "N/A", "rsi": "N/A", "macd_hist": "N/A"}
+            print(f"  {tf}: No sufficient data for trend analysis.")
             continue
 
         last_close = get_indicator_value(df, 'close')
@@ -457,16 +462,22 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
         macd_hist = get_indicator_value(df, 'MACDh_12_26_9') # Use MACDh as that's what pandas_ta provides
 
         tf_trend = "Neutral"
-        if len(df) >= 2 and isinstance(ema9, (int, float)) and isinstance(last_close, (int, float)) and 'EMA_9' in df.columns:
-            prev_ema9 = df['EMA_9'].iloc[-2] if not pd.isna(df['EMA_9'].iloc[-2]) else np.nan
-            prev_close = df['close'].iloc[-2] if not pd.isna(df['close'].iloc[-2]) else np.nan
+        # Trend based on Price vs EMA9 and previous candle vs EMA9
+        if isinstance(ema9, (int, float)) and isinstance(last_close, (int, float)) and 'EMA_9' in df.columns:
+            # Check previous EMA9 and close for trend confirmation
+            if len(df) > 1 and not pd.isna(df['EMA_9'].iloc[-2]) and not pd.isna(df['close'].iloc[-2]):
+                prev_ema9 = df['EMA_9'].iloc[-2]
+                prev_close = df['close'].iloc[-2]
 
-            if not pd.isna(prev_ema9) and not pd.isna(prev_close):
-                if last_close > ema9 and prev_close > prev_ema9:
+                if last_close > ema9 and prev_close > prev_ema9: # Both current and previous close above EMA9
                     tf_trend = "Uptrend"
-                elif last_close < ema9 and prev_close < prev_ema9:
+                elif last_close < ema9 and prev_close < prev_ema9: # Both current and previous close below EMA9
                     tf_trend = "Downtrend"
-        
+            elif last_close > ema9: # If only one candle or prev is NaN, judge by current position relative to EMA9
+                tf_trend = "Uptrend (weak)"
+            elif last_close < ema9:
+                tf_trend = "Downtrend (weak)"
+
         trend_analysis[tf] = {
             "trend": tf_trend,
             "last_close": last_close,
@@ -476,138 +487,195 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
         }
         print(f"  {tf} Trend Analysis: {trend_analysis[tf]}")
     
-    for tf in ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]:
-        if tf in trend_analysis and trend_analysis[tf]["trend"] != "Neutral":
-            overall_bias = trend_analysis[tf]["trend"].upper()
-            print(f"  Overall Bias determined from {tf}: {overall_bias}")
+    # Determine overall_bias from highest available timeframe with a determined trend
+    for tf_key in ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]: # Ordered from highest to lowest
+        if tf_key in trend_analysis and trend_analysis[tf_key]["trend"] not in ["Neutral", "No sufficient data", "Uptrend (weak)", "Downtrend (weak)"]:
+            overall_bias = trend_analysis[tf_key]["trend"].upper()
+            print(f"  Overall Bias determined from {tf_key}: {overall_bias}")
             break
     print(f"Final Overall Bias: {overall_bias}")
 
-    lowest_tf = sorted_timeframes[-1] if sorted_timeframes else None
-    print(f"Lowest Timeframe for Confirmation: {lowest_tf}")
+    confirmation_details = [] # This list will collect all specific details for confirmation reason
+    
+    # --- Start of Lowest Timeframe Specific Logic for Confidence Score ---
+    if lowest_tf_key_for_calc and lowest_tf_key_for_calc in analysis_data and not analysis_data[lowest_tf_key_for_calc]['df'].empty:
+        df_lowest = analysis_data[lowest_tf_key_for_calc]['df']
+        
+        # Ensure sufficient data points for lowest_tf for detailed analysis
+        if len(df_lowest) < 2:
+            confirmation_reason = f"Not enough historical data ({len(df_lowest)} candles) for lowest timeframe ({lowest_tf_key_for_calc}) for detailed confirmation. At least 2 candles are needed."
+            calculated_confidence_score = 30 # Default low confidence
+            calculated_signal_strength = "NEUTRAL"
+            entry_suggestion = "MONITOR"
+            confirmation_status = "PENDING"
+            print(f"  Confirmation Reason: {confirmation_reason}")
+            # Skip detailed indicator checks and signal determination, use default pending
+            # Return immediately with basic values if data is insufficient
+            return {
+                "overall_bias": overall_bias,
+                "confirmation_status": confirmation_status,
+                "confirmation_reason": confirmation_reason,
+                "entry_suggestion": entry_suggestion,
+                "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price, "risk_in_points": risk_in_points,
+                "position_size_suggestion": position_size_suggestion,
+                "calculated_confidence_score": calculated_confidence_score,
+                "calculated_signal_strength": calculated_signal_strength,
+                "sl_percent_change": sl_percent_change,
+                "tp1_percent_change": tp1_percent_change,
+                "tp2_percent_change": tp2_percent_change,
+                "trend_analysis_by_tf": {tf: {k: v for k, v in data.items() if k != 'df'} for tf, data in analysis_data.items()}
+            }
 
-    if lowest_tf and lowest_tf in analysis_data and not analysis_data[lowest_tf]['df'].empty:
-        df_lowest = analysis_data[lowest_tf]['df']
         last_close_lowest = get_indicator_value(df_lowest, 'close')
         prev_close_lowest = df_lowest['close'].iloc[-2] if len(df_lowest) > 1 and not pd.isna(df_lowest['close'].iloc[-2]) else np.nan
 
         ema9_lowest = get_indicator_value(df_lowest, 'EMA_9')
         rsi_lowest = get_indicator_value(df_lowest, 'RSI_14')
         macd_lowest = get_indicator_value(df_lowest, 'MACD_12_26_9')
-        macds_lowest = get_indicator_value(df_lowest, 'MACDs_12_26_9') # Use MACDs for signal line
-        macdh_lowest = get_indicator_value(df_lowest, 'MACDh_12_26_9') # Use MACDh for histogram
+        macds_lowest = get_indicator_value(df_lowest, 'MACDs_12_26_9') # Actual signal line
+        macdh_lowest = get_indicator_value(df_lowest, 'MACDh_12_26_9') # Histogram
         stoch_k_lowest = get_indicator_value(df_lowest, 'STOCHk_14_3_3')
         stoch_d_lowest = get_indicator_value(df_lowest, 'STOCHd_14_3_3')
         atr_lowest = get_indicator_value(df_lowest, 'ATR_14')
 
-        print(f"  Lowest TF ({lowest_tf}) Indicator Values:")
+        print(f"  Lowest TF ({lowest_tf_key_for_calc}) Indicator Values:")
         print(f"    Last Close: {last_close_lowest}, Prev Close: {prev_close_lowest}")
         print(f"    EMA9: {ema9_lowest}, RSI: {rsi_lowest}")
         print(f"    MACD: {macd_lowest}, MACDS: {macds_lowest}, MACDH: {macdh_lowest}, STOCH_K: {stoch_k_lowest}, STOCH_D: {stoch_d_lowest}, ATR: {atr_lowest}")
 
-        conditions = []
-        confirmation_details = []
+        directional_signals_count = 0
+        total_relevant_indicators = 0 # Only counts indicators selected AND for which data is available
+
 
         # Condition 1: Price Action (Strong Candle)
         if isinstance(last_close_lowest, (int, float)) and isinstance(prev_close_lowest, (int, float)):
-            if overall_bias == "BULLISH" and last_close_lowest > prev_close_lowest * 1.001:
-                conditions.append(True)
-                confirmation_details.append("Strong bullish candle detected.")
-            elif overall_bias == "BEARISH" and last_close_lowest < prev_close_lowest * 0.999:
-                conditions.append(True)
-                confirmation_details.append("Strong bearish candle detected.")
+            total_relevant_indicators += 1
+            if last_close_lowest > prev_close_lowest * 1.001: # 0.1% increase suggests strong bullish momentum
+                directional_signals_count += 1
+                confirmation_details.append("Price action: Strong bullish candle detected.")
+            elif last_close_lowest < prev_close_lowest * 0.999: # 0.1% decrease suggests strong bearish momentum
+                directional_signals_count += 1
+                confirmation_details.append("Price action: Strong bearish candle detected.")
             else:
-                conditions.append(False)
-                confirmation_details.append("No strong directional candle for lowest timeframe.")
+                confirmation_details.append("Price action: Neutral candle (no strong directional movement).")
         else:
-            conditions.append(False)
-            confirmation_details.append("Price action data is missing.")
+            confirmation_details.append("Price action: Data missing or invalid for candle analysis.")
 
 
         # Condition 2: Price vs. EMA9 - only if Moving Averages is selected and EMA_9 is available
-        if "Moving Averages" in selected_indicators_from_frontend and isinstance(ema9_lowest, (int, float)):
-            if overall_bias == "BULLISH" and last_close_lowest > ema9_lowest:
-                conditions.append(True)
-                confirmation_details.append("Price above EMA9.")
-            elif overall_bias == "BEARISH" and last_close_lowest < ema9_lowest:
-                conditions.append(True)
-                confirmation_details.append("Price below EMA9.")
+        if "Moving Averages" in selected_indicators_from_frontend and isinstance(ema9_lowest, (int, float)) and isinstance(last_close_lowest, (int, float)):
+            total_relevant_indicators += 1
+            if last_close_lowest > ema9_lowest:
+                directional_signals_count += 1
+                confirmation_details.append("EMA9: Price above EMA9 (bullish alignment).")
+            elif last_close_lowest < ema9_lowest:
+                directional_signals_count += 1
+                confirmation_details.append("EMA9: Price below EMA9 (bearish alignment).")
             else:
-                conditions.append(False)
-                confirmation_details.append("Price not aligned with EMA9.")
-        elif "Moving Averages" in selected_indicators_from_frontend:
-            conditions.append(False)
-            confirmation_details.append("EMA9 data missing for price alignment check.")
+                confirmation_details.append("EMA9: Price is neutral around EMA9.")
+        elif "Moving Averages" in selected_indicators_from_frontend: # Indicator was selected but data not available/valid
+            confirmation_details.append("EMA9: Data missing or not selected.")
 
 
         # Condition 3: RSI - only if RSI is selected and RSI is available
         if "RSI" in selected_indicators_from_frontend and isinstance(rsi_lowest, (int, float)):
-            if overall_bias == "BULLISH" and rsi_lowest > 50:
-                conditions.append(True)
-                confirmation_details.append("RSI is bullish (>50).")
-            elif overall_bias == "BEARISH" and rsi_lowest < 50:
-                conditions.append(True)
-                confirmation_details.append("RSI is bearish (<50).")
+            total_relevant_indicators += 1
+            if rsi_lowest > 60: # Overbought (strong buying pressure)
+                directional_signals_count += 1
+                confirmation_details.append("RSI: Overbought (>60), indicating strong recent buying pressure.")
+            elif rsi_lowest < 40: # Oversold (strong selling pressure)
+                directional_signals_count += 1
+                confirmation_details.append("RSI: Oversold (<40), indicating strong recent selling pressure.")
             else:
-                conditions.append(False)
-                confirmation_details.append("RSI is neutral (40-60).")
+                confirmation_details.append("RSI: Neutral (40-60).")
         elif "RSI" in selected_indicators_from_frontend:
-            conditions.append(False)
-            confirmation_details.append("RSI data missing.")
+            confirmation_details.append("RSI: Data missing or not selected.")
 
 
         # Condition 4: MACD Crossover / Momentum - only if MACD is selected
         if "MACD" in selected_indicators_from_frontend and isinstance(macd_lowest, (int, float)):
+            total_relevant_indicators += 1
             if isinstance(macds_lowest, (int, float)): # Prefer MACD signal line for crossover
-                if overall_bias == "BULLISH" and macd_lowest > macds_lowest:
-                    conditions.append(True)
-                    confirmation_details.append("MACD shows bullish crossover (MACD > MACDs).")
-                elif overall_bias == "BEARISH" and macd_lowest < macds_lowest:
-                    conditions.append(True)
-                    confirmation_details.append("MACD shows bearish crossover (MACD < MACDs).")
+                if macd_lowest > macds_lowest:
+                    directional_signals_count += 1
+                    confirmation_details.append("MACD: Bullish crossover (MACD line > Signal line).")
+                elif macd_lowest < macds_lowest:
+                    directional_signals_count += 1
+                    confirmation_details.append("MACD: Bearish crossover (MACD line < Signal line).")
                 else:
-                    conditions.append(False)
-                    confirmation_details.append("MACD is not confirming direction (crossover).")
+                    confirmation_details.append("MACD: No clear crossover signal.")
             elif isinstance(macdh_lowest, (int, float)): # Fallback to MACD Histogram if MACDs is not found or is N/A
-                if overall_bias == "BULLISH" and macdh_lowest > 0:
-                    conditions.append(True)
-                    confirmation_details.append("MACD histogram is bullish (>0, MACDs not available).")
-                elif overall_bias == "BEARISH" and macdh_lowest < 0:
-                    conditions.append(True)
-                    confirmation_details.append("MACD histogram is bearish (<0, MACDs not available).")
+                if macdh_lowest > 0:
+                    directional_signals_count += 1
+                    confirmation_details.append("MACD: Histogram bullish (>0).")
+                elif macdh_lowest < 0:
+                    directional_signals_count += 1
+                    confirmation_details.append("MACD: Histogram bearish (<0).")
                 else:
-                    conditions.append(False)
-                    confirmation_details.append("MACD histogram is neutral (MACDs not available).")
+                    confirmation_details.append("MACD: Histogram neutral.")
             else:
-                conditions.append(False)
-                confirmation_details.append("MACD indicator data missing for crossover/histogram check.")
+                confirmation_details.append("MACD: Data missing or invalid for crossover/histogram check.")
         elif "MACD" in selected_indicators_from_frontend:
-            conditions.append(False)
-            confirmation_details.append("MACD indicator data missing.")
+            confirmation_details.append("MACD: Data missing or not selected.")
 
 
-        # Condition 5: Stochastic Oscillator (not overbought/oversold) - only if Stochastic is selected
-        if "Stochastic Oscillator" in selected_indicators_from_frontend and isinstance(stoch_k_lowest, (int, float)):
-            if stoch_k_lowest > 20 and stoch_k_lowest < 80:
-                conditions.append(True)
-                confirmation_details.append("Stochastic is in mid-range (20-80).")
+        # Condition 5: Stochastic Oscillator (Crossover / Not Overbought/Oversold extremes) - only if Stochastic is selected
+        if "Stochastic Oscillator" in selected_indicators_from_frontend and \
+           isinstance(stoch_k_lowest, (int, float)) and isinstance(stoch_d_lowest, (int, float)):
+            total_relevant_indicators += 1
+            # Bullish crossover (K above D) and not overbought (below 80)
+            if stoch_k_lowest > stoch_d_lowest and stoch_k_lowest < 80: 
+                directional_signals_count += 1
+                confirmation_details.append("Stochastic: Bullish crossover (K above D), not overbought.")
+            # Bearish crossover (K below D) and not oversold (above 20)
+            elif stoch_k_lowest < stoch_d_lowest and stoch_k_lowest > 20: 
+                directional_signals_count += 1
+                confirmation_details.append("Stochastic: Bearish crossover (K below D), not oversold.")
+            elif stoch_k_lowest >= 80:
+                confirmation_details.append("Stochastic: Overbought (>=80), potential reversal or strong trend continuation.")
+            elif stoch_k_lowest <= 20:
+                confirmation_details.append("Stochastic: Oversold (<=20), potential reversal or strong trend continuation.")
             else:
-                conditions.append(False)
-                confirmation_details.append("Stochastic is in overbought/oversold zone.")
-        elif "Stochastic Oscillator" in selected_indicators_from_frontend:
-            conditions.append(False)
-            confirmation_details.append("Stochastic data missing.")
+                confirmation_details.append("Stochastic: Neutral (no clear crossover or in extreme zone).")
             
-        total_relevant_conditions = len(conditions)
-        met_conditions_count = sum(conditions)
-
-        if total_relevant_conditions > 0:
-            calculated_confidence_score = int((met_conditions_count / total_relevant_conditions) * 100)
+        elif "Stochastic Oscillator" in selected_indicators_from_frontend:
+            confirmation_details.append("Stochastic: Data missing or not selected.")
+        
+        # Calculate confidence score based on number of directional signals
+        if total_relevant_indicators > 0:
+            calculated_confidence_score = int((directional_signals_count / total_relevant_indicators) * 100)
         else:
-            calculated_confidence_score = 50 # Default if no relevant conditions were checked
-            confirmation_details.append("No relevant ORMCR indicators available or selected for confirmation.")
+            calculated_confidence_score = 30 # Default to a lower score if no relevant indicators were checked
+            confirmation_details.append("No relevant ORMCR indicators available or selected for lowest timeframe confirmation, defaulting confidence to 30%.")
 
-        if calculated_confidence_score < 40:
+        print(f"  Directional Signals Count: {directional_signals_count}")
+        print(f"  Total Relevant Indicators: {total_relevant_indicators}")
+        print(f"  Calculated Confidence Score (based on directional signals): {calculated_confidence_score}%")
+
+        # --- Determine final signal strength based on overall bias and confidence ---
+        if overall_bias == "NEUTRAL":
+            if calculated_confidence_score >= 60: # If high confidence of ANY direction on lowest TF despite neutral overall bias
+                # Check for majority bullish/bearish details for a cautious signal
+                num_bullish_details = sum(1 for detail in confirmation_details if "bullish" in detail.lower() or "overbought" in detail.lower())
+                num_bearish_details = sum(1 for detail in confirmation_details if "bearish" in detail.lower() or "oversold" in detail.lower())
+
+                if num_bullish_details > num_bearish_details:
+                    calculated_signal_strength = "CAUTIOUS BUY"
+                    entry_suggestion = "MONITOR (Cautious bullish signal on lowest TF)"
+                    confirmation_status = "NEUTRAL BIAS, CAUTIOUS SIGNAL"
+                elif num_bearish_details > num_bullish_details:
+                    calculated_signal_strength = "CAUTIOUS SELL"
+                    entry_suggestion = "MONITOR (Cautious bearish signal on lowest TF)"
+                    confirmation_status = "NEUTRAL BIAS, CAUTIOUS SIGNAL"
+                else: # Balanced or no strong majority on lowest TF
+                    calculated_signal_strength = "NEUTRAL"
+                    entry_suggestion = "MONITOR"
+                    confirmation_status = "PENDING"
+            else: # Low confidence with neutral overall bias
+                calculated_signal_strength = "NEUTRAL"
+                entry_suggestion = "MONITOR"
+                confirmation_status = "PENDING"
+        elif calculated_confidence_score < 40: # Low confidence overrides even strong overall bias
             calculated_signal_strength = "NEUTRAL"
             entry_suggestion = "MONITOR"
             confirmation_status = "PENDING"
@@ -621,7 +689,7 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
                 entry_suggestion = "ENTER NOW"
                 confirmation_status = "CONFIRMED"
             else:
-                calculated_signal_strength = "MONITOR"
+                calculated_signal_strength = "MONITOR" # Even with bullish bias, if confidence is low, still monitor
                 entry_suggestion = "MONITOR"
                 confirmation_status = "PENDING"
         elif overall_bias == "BEARISH":
@@ -634,53 +702,98 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
                 entry_suggestion = "ENTER NOW"
                 confirmation_status = "CONFIRMED"
             else:
-                calculated_signal_strength = "MONITOR"
+                calculated_signal_strength = "MONITOR" # Even with bearish bias, if confidence is low, still monitor
                 entry_suggestion = "MONITOR"
                 confirmation_status = "PENDING"
-        else:
-            calculated_signal_strength = "NEUTRAL"
-            entry_suggestion = "MONITOR"
-            confirmation_status = "PENDING"
 
-        confirmation_reason = ". ".join(confirmation_details)
-        if not confirmation_reason.endswith('.'):
-            confirmation_reason += '.'
-
+        # Calculate SL/TP prices based on entry_suggestion and ATR
         if entry_suggestion == "ENTER NOW" and isinstance(last_close_lowest, (int, float)):
-            if overall_bias == "BULLISH":
-                sl_price = round(last_close_lowest * 0.995, 2)
-                tp1_price = round(last_close_lowest * 1.01, 2)
-                tp2_price = round(last_close_lowest * 1.02, 2)
-                risk_in_points = round(last_close_lowest - sl_price, 2)
-            elif overall_bias == "BEARISH":
-                sl_price = round(last_close_lowest * 1.005, 2)
-                tp1_price = round(last_close_lowest * 0.99, 2)
-                tp2_price = round(last_close_lowest * 0.98, 2)
-                risk_in_points = round(sl_price - last_close_lowest, 2) if sl_price > last_close_lowest else round(last_close_lowest - sl_price, 2)
-            position_size_suggestion = "2.5% of balance (example)"
-        else:
+            if isinstance(atr_lowest, (int, float)) and atr_lowest > 0: # Ensure ATR is a positive number
+                # Use ATR for dynamic SL/TP calculation
+                # For scalp trades, usually smaller multipliers
+                print(f"DEBUG: Using ATR ({atr_lowest}) for SL/TP calculation.")
+                if calculated_signal_strength in ["BUY", "STRONG BUY", "CAUTIOUS BUY"]: # Bullish trade
+                    sl_price = round(last_close_lowest - (atr_lowest * 0.5), 2) # 0.5 ATR below close
+                    tp1_price = round(last_close_lowest + (atr_lowest * 1), 2) # 1 ATR above close
+                    tp2_price = round(last_close_lowest + (atr_lowest * 2), 2) # 2 ATR above close
+                    # Ensure SL is not above entry for long, and vice-versa
+                    sl_price = min(sl_price, last_close_lowest) # Ensure SL for long is below current price (safety)
+                elif calculated_signal_strength in ["SELL", "STRONG SELL", "CAUTIOUS SELL"]: # Bearish trade
+                    sl_price = round(last_close_lowest + (atr_lowest * 0.5), 2) # 0.5 ATR above close
+                    tp1_price = round(last_close_lowest - (atr_lowest * 1), 2) # 1 ATR below close
+                    tp2_price = round(last_close_lowest - (atr_lowest * 2), 2) # 2 ATR below close
+                    sl_price = max(sl_price, last_close_lowest) # Ensure SL for short is above current price (safety)
+                
+                # Calculate percentage change for SL/TP
+                if last_close_lowest != 0:
+                    sl_percent_change = round(((sl_price - last_close_lowest) / last_close_lowest) * 100, 2)
+                    tp1_percent_change = round(((tp1_price - last_close_lowest) / last_close_lowest) * 100, 2)
+                    tp2_percent_change = round(((tp2_price - last_close_lowest) / last_close_lowest) * 100, 2)
+                else:
+                    sl_percent_change, tp1_percent_change, tp2_percent_change = "N/A", "N/A", "N/A"
+
+                risk_in_points = round(abs(last_close_lowest - sl_price), 2)
+                position_size_suggestion = "Calculated based on 2.5% risk (example)" # Placeholder, full calculation depends on balance and actual risk tolerance
+            else: # Fallback to fixed percentages if ATR is not available or invalid
+                confirmation_details.append("ATR data not available or invalid for dynamic SL/TP, using fixed percentages.")
+                print(f"DEBUG: Falling back to fixed percentages for SL/TP as ATR is not valid ({atr_lowest}).")
+                if calculated_signal_strength in ["BUY", "STRONG BUY", "CAUTIOUS BUY"]: # Bullish trade
+                    sl_price = round(last_close_lowest * 0.995, 2) # 0.5% risk
+                    tp1_price = round(last_close_lowest * 1.01, 2) # 1% gain
+                    tp2_price = round(last_close_lowest * 1.02, 2) # 2% gain
+                elif calculated_signal_strength in ["SELL", "STRONG SELL", "CAUTIOUS SELL"]: # Bearish trade
+                    sl_price = round(last_close_lowest * 1.005, 2) # 0.5% risk
+                    tp1_price = round(last_close_lowest * 0.99, 2) # 1% gain
+                    tp2_price = round(last_close_lowest * 0.98, 2) # 2% gain
+                
+                if last_close_lowest != 0:
+                    sl_percent_change = round(((sl_price - last_close_lowest) / last_close_lowest) * 100, 2)
+                    tp1_percent_change = round(((tp1_price - last_close_lowest) / last_close_lowest) * 100, 2)
+                    tp2_percent_change = round(((tp2_price - last_close_lowest) / last_close_lowest) * 100, 2)
+                else:
+                    sl_percent_change, tp1_percent_change, tp2_percent_change = "N/A", "N/A", "N/A"
+
+                risk_in_points = round(abs(last_close_lowest - sl_price), 2)
+                position_size_suggestion = "Calculated based on 2.5% risk (example)"
+
+        else: # If not "ENTER NOW" signal, SL/TP are N/A
             sl_price = "N/A"
             tp1_price = "N/A"
             tp2_price = "N/A"
             risk_in_points = "N/A"
             position_size_suggestion = "User to calculate"
-            
-        print(f"  Conditions Met: {met_conditions_count}/{total_relevant_conditions}")
-        print(f"  Calculated Confidence Score: {calculated_confidence_score}%")
-        print(f"  Calculated Signal Strength: {calculated_signal_strength}")
-        print(f"  Confirmation Status: {confirmation_status}, Reason: {confirmation_reason}")
-    else:
-        confirmation_reason = "Not enough data for lowest timeframe confirmation or lowest timeframe not selected."
-        calculated_confidence_score = 30
+            sl_percent_change, tp1_percent_change, tp2_percent_change = "N/A", "N/A", "N/A"
+        
+        print(f"  Confidence Score: {calculated_confidence_score}%")
+        print(f"  Signal Strength: {calculated_signal_strength}")
+        print(f"  Confirmation Status: {confirmation_status}")
+    else: # If lowest_tf_key_for_calc was empty or invalid at the beginning of the function
+        # This block handles cases where even the initial lowest TF data fetch failed or was insufficient
+        confirmation_reason = "No valid data could be fetched for the lowest selected timeframe for detailed confirmation."
+        calculated_confidence_score = 30 # Default low confidence
+        calculated_signal_strength = "NEUTRAL"
+        entry_suggestion = "MONITOR"
+        confirmation_status = "PENDING"
+        sl_price = "N/A"
+        tp1_price = "N/A"
+        tp2_price = "N/A"
+        risk_in_points = "N/A"
+        position_size_suggestion = "User to calculate"
+        sl_percent_change, tp1_percent_change, tp2_percent_change = "N/A", "N/A", "N/A"
+
         print(f"  Confirmation Reason: {confirmation_reason}")
         
     print(f"--- ORMCR Logic Finished ---")
-    print(f"Final ORMCR Results: Overall Bias={overall_bias}, Confirmation Status={confirmation_status}, Reason={confirmation_reason}, Confidence={calculated_confidence_score}, Signal={calculated_signal_strength}")
+    
+    # Final confirmation reason combines all details, ensuring it's not empty
+    final_confirmation_reason = ". ".join([detail for detail in confirmation_details if detail])
+    if not final_confirmation_reason: # Fallback if no details were added to the list
+        final_confirmation_reason = "No specific confirmation details generated."
 
     return {
         "overall_bias": overall_bias,
         "confirmation_status": confirmation_status,
-        "confirmation_reason": confirmation_reason,
+        "confirmation_reason": final_confirmation_reason,
         "entry_suggestion": entry_suggestion,
         "sl_price": sl_price,
         "tp1_price": tp1_price,
@@ -689,6 +802,9 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
         "position_size_suggestion": position_size_suggestion,
         "calculated_confidence_score": calculated_confidence_score,
         "calculated_signal_strength": calculated_signal_strength,
+        "sl_percent_change": sl_percent_change, 
+        "tp1_percent_change": tp1_percent_change,
+        "tp2_percent_change": tp2_percent_change,
         "trend_analysis_by_tf": {tf: {k: v for k, v in data.items() if k != 'df'} for tf, data in analysis_data.items()}
     }
 
@@ -714,6 +830,7 @@ def run_ormcr_analysis():
     if not valid_timeframes:
         return jsonify({"error": "No valid timeframes provided"}), 400
     
+    # Sort timeframes for consistent trend analysis (highest to lowest)
     valid_timeframes.sort(key=lambda x: int(BYBIT_INTERVAL_MAP[x]["interval"]) if BYBIT_INTERVAL_MAP[x]["interval"].isdigit() else 999999, reverse=True)
 
 
@@ -738,7 +855,7 @@ def run_ormcr_analysis():
             "last_price": last_price_val,
             "volume": volume_val
         }
-        time.sleep(0.2)
+        time.sleep(0.2) # Small delay to avoid hitting API rate limits
 
     if not analysis_data_by_tf:
         return jsonify({"error": "No valid market data could be fetched for analysis. Please check currency pair and timeframes."}), 500
@@ -749,14 +866,14 @@ def run_ormcr_analysis():
     detailed_tf_data_for_prompt = {}
     for tf, data in analysis_data_by_tf.items():
         indicators_snapshot_dict = {}
-        # Updated to match actual pandas_ta naming
+        # Updated to match actual pandas_ta naming and include common indicator outputs
         indicator_cols = [
             'RSI_14', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9', 
             'EMA_9', 'SMA_20', 'EMA_50',
-            'BBL_5_2.0', 'BBM_5_2.0', 'BBU_5_2.0',
+            'BBL_5_2.0', 'BBM_5_2.0', 'BBU_5_2.0', 'BBB_5_2.0', 'BBP_5_2.0',
             'STOCHk_14_3_3', 'STOCHd_14_3_3',
-            'ATR_14', 'ATRr_14', # Also check for ATRr, which is the normalized ATR
-            'volume'
+            'ATR_14', 'ATRr_14', # Include raw ATR and normalized ATR
+            'volume' # Include volume as an "indicator"
         ]
         for ind_col in indicator_cols:
             indicators_snapshot_dict[ind_col] = get_indicator_value(data["df"], ind_col)
@@ -774,6 +891,8 @@ def run_ormcr_analysis():
 
     prompt_parts = [
         "You are Aura, an advanced AI trading assistant specializing in the ORMCR strategy.",
+        "Your goal is to provide insightful, helpful, and **friendly** analysis results. Adopt a **conversational, approachable, and encouraging tone**. Avoid overly formal or robotic language.",
+        "You can use emojis if appropriate to convey friendliness (e.g., 😊📈).",
         "The user has requested an analysis for:",
         f"- Currency Pair: {currency_pair}",
         f"- Selected Timeframes (highest to lowest): {', '.join(valid_timeframes)}",
@@ -790,12 +909,12 @@ def run_ormcr_analysis():
         """
         {
             "confidence_score": "X%",
-            "signal_strength": "STRONG BUY/BUY/NEUTRAL/SELL/STRONG SELL",
-            "market_summary": "Detailed summary based on multi-timeframe trend, price action, and key indicators.",
+            "signal_strength": "STRONG BUY/BUY/NEUTRAL/SELL/STRONG SELL/CAUTIOUS BUY/CAUTIOUS SELL",
+            "market_summary": "Detailed summary based on multi-timeframe trend, price action, and key indicators. Explain the overall bias (e.g., 'The D1 timeframe shows an Uptrend...'), and then discuss the lowest timeframe's alignment with this bias or its own short-term signals.",
             "ai_suggestion": {
                 "entry_type": "BUY ORDER/SELL ORDER/WAIT",
                 "recommended_action": "ENTER NOW/MONITOR/AVOID",
-                "position_size": "X% of balance"
+                "position_size": "X% of balance (e.g., based on 2.5% risk tolerance, or User to calculate)"
             },
             "stop_loss": {
                 "price": "$X.XX",
@@ -809,13 +928,15 @@ def run_ormcr_analysis():
                 "price": "$X.XX",
                 "percentage_change": "X.XX%"
             },
-            "technical_indicators_analysis": "Based on the 'indicators_snapshot' provided in 'detailed_timeframe_data', interpret the values for all selected indicators (RSI, MACD, Stochastic, Moving Averages, Bollinger Bands, Volume, ATR, Fibonacci Retracements if applicable) across the relevant timeframes, focusing on the lowest timeframe for potential entry signals. Explain what each indicator suggests about market conditions (e.g., overbought/oversold for RSI, momentum for MACD, volatility for Bollinger Bands, etc.).",
-            "next_step_for_user": "What the user should do next (e.g., 'Monitor for confirmation', 'Proceed with the trade', 'Review other timeframes')."
+            "technical_indicators_analysis": "Based on the 'indicators_snapshot' provided in 'detailed_timeframe_data', interpret the values for all selected indicators (RSI, MACD, Stochastic, Moving Averages, Bollinger Bands, Volume, ATR, Fibonacci Retracements if applicable) across the relevant timeframes, focusing on the lowest timeframe for potential entry signals. Explain what each indicator suggests about market conditions (e.g., overbought/oversold for RSI, momentum for MACD, volatility for Bollinger Bands, etc.). For each indicator that was selected, explain its reading and what it implies for the current market state. If an indicator was not selected or its data was not available, you can briefly mention that it was not included in this specific analysis.",
+            "next_step_for_user": "What the user should do next (e.g., 'Monitor for confirmation', 'Proceed with the trade', 'Review other timeframes', 'Consider a cautious entry')."
         }
         """,
-        "\n**IMPORTANT:**",
+        "\n**IMPORTANT GUIDELINES FOR YOUR RESPONSE:**",
         f"- The 'confidence_score' should be '{ormcr_results['calculated_confidence_score']}%' based on the backend's calculation.",
         f"- The 'signal_strength' should be '{ormcr_results['calculated_signal_strength']}' based on the backend's calculation.",
+        f"- The 'entry_type' and 'recommended_action' in 'ai_suggestion' should directly map to '{ormcr_results['entry_suggestion']}'.",
+        f"- For stop_loss and take_profit, use the calculated 'sl_price', 'tp1_price', 'tp2_price' and their corresponding 'sl_percent_change', 'tp1_percent_change', 'tp2_percent_change' from 'ormcr_analysis'. If these are 'N/A', represent them as 'N/A'.",
         f"- If 'ormcr_confirmation_status' is 'PENDING', ensure 'entry_type' is 'WAIT' and 'recommended_action' is 'MONITOR', and explain why in 'market_summary' and 'next_step_for_user'. Also, if 'ormcr_confirmation_status' is 'PENDING', provide 'N/A' for SL/TP prices and percentages.",
         "\n**IMPORTANT: Maintain a friendly, conversational, and encouraging tone throughout your response. Use simple, clear language and feel free to include relevant emojis to enhance friendliness (e.g., 😊📈).**"
     ]
@@ -870,17 +991,21 @@ def run_ormcr_analysis():
         
         ai_analysis_results = json.loads(response.candidates[0].content.parts[0].text)
 
+        # Append ORMCR backend results for frontend to display
         ai_analysis_results['ormcr_confirmation_status'] = ormcr_results['confirmation_status']
         ai_analysis_results['ormcr_overall_bias'] = ormcr_results['overall_bias']
-        ai_analysis_results['ormcr_reason'] = ormcr_results['confirmation_reason']
+        ai_analysis_results['ormcr_reason'] = ormcr_results['confirmation_reason'] # This is the detailed reason from backend
 
-        if ai_analysis_results['ormcr_confirmation_status'] == "PENDING":
-            ai_analysis_results['stop_loss']['price'] = "N/A"
-            ai_analysis_results['stop_loss']['percentage_change'] = "N/A"
-            ai_analysis_results['take_profit_1']['price'] = "N/A"
-            ai_analysis_results['take_profit_1']['percentage_change'] = "N/A"
-            ai_analysis_results['take_profit_2']['price'] = "N/A"
-            ai_analysis_results['take_profit_2']['percentage_change'] = "N/A"
+        # Ensure SL/TP values match backend calculations, especially if N/A
+        ai_analysis_results['stop_loss']['price'] = ormcr_results['sl_price']
+        ai_analysis_results['stop_loss']['percentage_change'] = ormcr_results['sl_percent_change']
+        ai_analysis_results['take_profit_1']['price'] = ormcr_results['tp1_price']
+        ai_analysis_results['take_profit_1']['percentage_change'] = ormcr_results['tp1_percent_change']
+        ai_analysis_results['take_profit_2']['price'] = ormcr_results['tp2_price']
+        ai_analysis_results['take_profit_2']['percentage_change'] = ormcr_results['tp2_percent_change']
+        
+        # Ensure position_size reflects backend logic
+        ai_analysis_results['ai_suggestion']['position_size'] = ormcr_results['position_size_suggestion']
 
 
         return jsonify(ai_analysis_results)
