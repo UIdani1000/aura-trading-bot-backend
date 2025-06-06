@@ -83,7 +83,7 @@ def get_all_market_prices():
                 category="spot",
                 symbol=symbol,
                 interval="D", # Daily interval for general market overview
-                limit=500 # Increased limit to ensure enough data for indicators
+                limit=2000 # Increased limit to 2000
             )
             kline_data = kline_response.get('result', {}).get('list', [])
             # print(f"Raw kline_data for {symbol} (first 5 and last 5): {kline_data[:5]} ... {kline_data[-5:]}")
@@ -235,13 +235,13 @@ def get_trades():
 
 # Mapping for Bybit interval strings and data limits
 BYBIT_INTERVAL_MAP = {
-    "M1": {"interval": "1", "limit": 500}, # Increased limit
-    "M5": {"interval": "5", "limit": 500}, # Increased limit
-    "M15": {"interval": "15", "limit": 500}, # Increased limit
-    "M30": {"interval": "30", "limit": 500}, # Increased limit
-    "H1": {"interval": "60", "limit": 500}, # Increased limit
-    "H4": {"interval": "240", "limit": 500}, # Increased limit
-    "D1": {"interval": "D", "limit": 500}, # Increased limit
+    "M1": {"interval": "1", "limit": 2000}, # Increased limit
+    "M5": {"interval": "5", "limit": 2000}, # Increased limit
+    "M15": {"interval": "15", "limit": 2000}, # Increased limit
+    "M30": {"interval": "30", "limit": 2000}, # Increased limit
+    "H1": {"interval": "60", "limit": 2000}, # Increased limit
+    "H4": {"interval": "240", "limit": 2000}, # Increased limit
+    "D1": {"interval": "D", "limit": 2000}, # Increased limit
 }
 
 def fetch_real_ohlcv(symbol, interval_key):
@@ -309,7 +309,12 @@ def calculate_indicators_for_df(df, indicators):
     print("\n--- DEBUG: DataFrame Tail for Indicator Columns after pandas_ta calculation ---")
     selected_cols = [col for col in ['MACD_12_26_9', 'MACDS_12_26_9', 'MACDH_12_26_9', 'ATR_14', 'RSI_14', 'STOCHk_14_3_3'] if col in df_copy.columns]
     if selected_cols:
-        print(df_copy[selected_cols].tail(10)) # Show last 10 rows for these columns
+        # Print only the rows that might contain NaNs at the end, if any
+        # Check if the last row of critical columns is NaN
+        tail_data = df_copy[selected_cols].tail(10)
+        print(tail_data)
+        if tail_data.iloc[-1].isnull().any():
+            print("WARNING: Last row of selected indicators contains NaN values.")
     else:
         print("No selected indicator columns found in DataFrame after calculation.")
     print("------------------------------------------------------------------")
