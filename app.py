@@ -1,5 +1,5 @@
 import os
-import sys # Import sys for df.info()
+import sys
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -8,52 +8,42 @@ import pandas as pd
 import pandas_ta as ta
 from datetime import datetime, timedelta
 import random
-import json # Import json for structured responses
-import numpy as np # Import numpy to handle NaN values
-import time # Import time for delays
-import traceback # Import traceback for detailed error logging
+import json
+import numpy as np
+import time
+import traceback
 
-# Load environment variables from .env file
 load_dotenv()
 
-app = Flask(__name__) # Initialize your Flask app first
-CORS(app) # THEN enable CORS for the app instance
+app = Flask(__name__)
+CORS(app)
 
-# --- Configuration ---
 BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY')
 BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET')
-GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY') # Ensure this matches your .env
+GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 
-# Initialize Bybit client
 if BYBIT_API_KEY and BYBIT_API_SECRET:
     bybit_client = HTTP(
         api_key=BYBIT_API_KEY,
         api_secret=BYBIT_API_SECRET,
-        testnet=False, # Set to True for testnet
-        timeout=30 # Increased timeout to 30 seconds
+        testnet=False,
+        timeout=30
     )
     print("--- Bybit client initialized ---")
 else:
     bybit_client = None
     print("--- Bybit API keys not found. Bybit client not initialized. ---")
 
-# Initialize Google Gemini
 try:
     import google.generativeai as genai
     genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-2.0-flash') # Using gemini-2.0-flash
+    gemini_model = genai.GenerativeModel('gemini-2.0-flash')
     print("--- Successfully initialized model to gemini-2.0-flash at startup ---")
 except Exception as e:
     gemini_model = None
     print(f"--- Failed to initialize Gemini model: {e} ---")
 
-# --- Helper Functions ---
-
 def get_indicator_value(df, indicator_name, default_val="N/A"):
-    """
-    Helper to safely get the most recent indicator value from the DataFrame.
-    Assumes DataFrame is ordered oldest to newest (iloc[-1] is most recent).
-    """
     if indicator_name in df.columns:
         last_val = df[indicator_name].iloc[-1]
         if pd.isna(last_val):
@@ -65,7 +55,6 @@ def get_indicator_value(df, indicator_name, default_val="N/A"):
     print(f"DEBUG: get_indicator_value for {indicator_name}: Column not found, returning '{default_val}'")
     return default_val
 
-# Function to fetch live market data (for dashboard)
 @app.route('/all_market_prices', methods=['GET'])
 def get_all_market_prices():
     if not bybit_client:
@@ -81,34 +70,45 @@ def get_all_market_prices():
             kline_response = bybit_client.get_kline(
                 category="spot",
                 symbol=symbol,
-                interval="D", # Daily interval for general market overview
-                limit=1000 # Max limit supported by Bybit
+                interval="D",
+                limit=1000
             )
             kline_data = kline_response.get('result', {}).get('list', [])
 
-            if kline_data and len(kline_data) >= 2: # Need at least 2 candles for percent change
+            if kline_data and len(kline_data) >= 2:
                 df = pd.DataFrame(kline_data, columns=['start', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-                df['close'] = pd.to_numeric(df['close'])
-                df['volume'] = pd.to_numeric(df['volume'])
-                df['start'] = pd.to_numeric(df['start']) # Explicitly cast to numeric to avoid FutureWarning
+                
+                # --- CRITICAL FIX: Ensure all OHLCV and volume columns are numeric ---
+                numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'turnover']
+                for col in numeric_cols:
+                    df[col] = pd.to_numeric(df[col], errors='coerce') # Convert non-numeric to NaN
+                
+                df['start'] = pd.to_numeric(df['start'])
                 df['start'] = pd.to_datetime(df['start'], unit='ms') 
                 df.set_index('start', inplace=True)
                 df = df.iloc[::-1] # Reverse DataFrame to be OLDEST TO NEWEST
+
+                # --- DEBUG: Verify dtypes after conversion ---
+                print(f"\n--- DEBUG: Dashboard {symbol} dtypes after numeric conversion ---")
+                df.info(verbose=True, buf=sys.stdout) # Use verbose=True to see all dtypes
+                print("------------------------------------------------------------------")
+                
+                # Check for NaNs immediately after conversion in critical columns
+                if df[numeric_cols].isnull().any().any():
+                    print(f"WARNING: Dashboard {symbol} has NaN values in OHLCV or volume columns after conversion.")
+                    # Optionally, handle rows with NaNs (e.g., drop them)
+                    # df.dropna(subset=numeric_cols, inplace=True)
+
 
                 last_close = df['close'].iloc[-1]
                 prev_close = df['close'].iloc[-2] if len(df) > 1 else last_close
                 percent_change = ((last_close - prev_close) / prev_close) * 100 if prev_close != 0 else 0
 
-                # --- Apply Indicators for Dashboard ---
-                # These are explicitly calculated for the dashboard view
-                df.ta.rsi(append=True) # Adds 'RSI_14'
-                df.ta.macd(append=True) # Adds 'MACD_12_26_9', 'MACDH_12_26_9', 'MACDS_12_26_9'
-                df.ta.stoch(append=True) # Adds 'STOCHk_14_3_3', 'STOCHd_14_3_3'
-                df.ta.atr(append=True) # Adding ATR for consistent debugging, even if not shown on dashboard initially
-                # Can add EMA, SMA, Bollinger Bands here if needed for dashboard display too.
-                # Example: df.ta.ema(length=9, append=True)
+                df.ta.rsi(append=True)
+                df.ta.macd(append=True)
+                df.ta.stoch(append=True)
+                df.ta.atr(append=True)
 
-                # --- DEBUG PRINT: Show DataFrame info and tail for dashboard indicators ---
                 print(f"\n--- DEBUG: Dashboard {symbol} DataFrame info after pandas_ta ---")
                 df.info(verbose=False, buf=sys.stdout)
                 print("------------------------------------------------------------------")
@@ -124,19 +124,14 @@ def get_all_market_prices():
                 else:
                     print(f"No selected indicator columns found for dashboard {symbol} after calculation.")
                 print("------------------------------------------------------------------")
-                # --- END DEBUG PRINT ---
-
 
                 orscr_signal = "NEUTRAL"
                 rsi_val = get_indicator_value(df, 'RSI_14', default_val="N/A")
                 macd_val = get_indicator_value(df, 'MACD_12_26_9', default_val="N/A")
-                macds_val = get_indicator_value(df, 'MACDS_12_26_9', default_val="N/A") # This will now be properly checked
+                macds_val = get_indicator_value(df, 'MACDS_12_26_9', default_val="N/A")
                 stoch_k_val = get_indicator_value(df, 'STOCHk_14_3_3', default_val="N/A")
-                # ATR value can be retrieved here too if desired for dashboard, but not in ORSCR logic directly
-                # atr_val = get_indicator_value(df, 'ATR_14', default_val="N/A")
-
-
-                # Check if indicators are numeric before applying ORSCR logic for dashboard signal
+                
+                # Condition for dashboard signal: all three must be numeric for a BUY/SELL signal
                 if isinstance(rsi_val, (int, float)) and isinstance(macd_val, (int, float)) and isinstance(macds_val, (int, float)):
                     if rsi_val > 60 and macd_val > macds_val:
                         orscr_signal = "BUY"
@@ -144,7 +139,6 @@ def get_all_market_prices():
                         orscr_signal = "SELL"
                 else:
                     orscr_signal = "N/A (Indicators not available for ORSCR logic)"
-
 
                 market_data[symbol] = {
                     "price": round(float(last_close), 2),
@@ -175,7 +169,6 @@ def get_all_market_prices():
 
     return jsonify(market_data)
 
-# --- Chat Endpoint (Existing) ---
 @app.route('/chat', methods=['POST'])
 def chat():
     if not gemini_model:
@@ -185,14 +178,11 @@ def chat():
     if not user_message:
         return jsonify({"error": "No message provided"}), 400
 
-    # Fetch live market data for context
     market_data_response = get_all_market_prices()
     market_data = market_data_response.json
 
-    # Fetch mock trade history for context
     trade_history = get_trades().json
 
-    # Construct context for Gemini
     context = f"""
     You are Aura, an AI trading assistant. Your goal is to provide insightful, helpful, and **friendly** responses to the user's trading-related questions.
     Adopt a **conversational, approachable, and encouraging tone**. Avoid overly formal or robotic language.
@@ -216,7 +206,6 @@ def chat():
         traceback.print_exc()
         return jsonify({"error": f"Failed to get AI response: {e}"}), 500
 
-# --- Trade Log Endpoints (Existing - using local JSON file) ---
 TRADE_LOG_FILE = 'trades.json'
 
 def load_trades():
@@ -250,21 +239,17 @@ def get_trades():
     trades = load_trades()
     return jsonify(trades)
 
-# --- ORMCR Analysis Endpoint ---
-
-# Mapping for Bybit interval strings and data limits
 BYBIT_INTERVAL_MAP = {
-    "M1": {"interval": "1", "limit": 1000}, # Max limit supported by Bybit
-    "M5": {"interval": "5", "limit": 1000}, # Max limit supported by Bybit
-    "M15": {"interval": "15", "limit": 1000}, # Max limit supported by Bybit
-    "M30": {"interval": "30", "limit": 1000}, # Max limit supported by Bybit
-    "H1": {"interval": "60", "limit": 1000}, # Max limit supported by Bybit
-    "H4": {"interval": "240", "limit": 1000}, # Max limit supported by Bybit
-    "D1": {"interval": "D", "limit": 1000}, # Max limit supported by Bybit
+    "M1": {"interval": "1", "limit": 1000},
+    "M5": {"interval": "5", "limit": 1000},
+    "M15": {"interval": "15", "limit": 1000},
+    "M30": {"interval": "30", "limit": 1000},
+    "H1": {"interval": "60", "limit": 1000},
+    "H4": {"interval": "240", "limit": 1000},
+    "D1": {"interval": "D", "limit": 1000},
 }
 
 def fetch_real_ohlcv(symbol, interval_key):
-    """Fetches real OHLCV data from Bybit for a given symbol and interval."""
     if not bybit_client:
         print("Bybit client not initialized. Cannot fetch real data.")
         return pd.DataFrame()
@@ -286,11 +271,24 @@ def fetch_real_ohlcv(symbol, interval_key):
             return pd.DataFrame()
 
         df = pd.DataFrame(kline_data, columns=['start', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-        df['start'] = pd.to_numeric(df['start']) # Explicitly cast to numeric to avoid FutureWarning
+        
+        # --- CRITICAL FIX: Ensure all OHLCV and volume columns are numeric ---
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'turnover']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce') # Convert non-numeric to NaN
+
+        df['start'] = pd.to_numeric(df['start'])
         df['start'] = pd.to_datetime(df['start'], unit='ms')
-        df[['open', 'high', 'low', 'close', 'volume', 'turnover']] = df[['open', 'high', 'low', 'close', 'volume', 'turnover']].apply(pd.to_numeric)
         df.set_index('start', inplace=True)
-        df = df.iloc[::-1] # Reverse the DataFrame to be oldest to newest
+        df = df.iloc[::-1]
+
+        # --- DEBUG: Verify dtypes after conversion in fetch_real_ohlcv ---
+        print(f"\n--- DEBUG: fetch_real_ohlcv for {symbol} ({interval_key}) dtypes after numeric conversion ---")
+        df.info(verbose=True, buf=sys.stdout) # Use verbose=True to see all dtypes
+        print("------------------------------------------------------------------")
+
+        if df[numeric_cols].isnull().any().any():
+            print(f"WARNING: fetch_real_ohlcv for {symbol} ({interval_key}) has NaN values in OHLCV or volume columns after conversion.")
 
         return df
 
@@ -301,7 +299,6 @@ def fetch_real_ohlcv(symbol, interval_key):
 
 
 def calculate_indicators_for_df(df, indicators):
-    """Calculates selected indicators for a DataFrame."""
     df_copy = df.copy()
     
     if "RSI" in indicators:
@@ -321,7 +318,6 @@ def calculate_indicators_for_df(df, indicators):
     if "ATR" in indicators:
         df_copy.ta.atr(append=True)
 
-    # --- DEBUG PRINT: Show DataFrame info and tail for critical indicators ---
     print(f"\n--- DEBUG: ORMCR Analysis DataFrame info after pandas_ta for columns: {df_copy.columns.tolist()} ---")
     df_copy.info(verbose=False, buf=sys.stdout)
     print("------------------------------------------------------------------")
@@ -337,15 +333,10 @@ def calculate_indicators_for_df(df, indicators):
     else:
         print("No selected indicator columns found in ORMCR Analysis DataFrame after calculation.")
     print("------------------------------------------------------------------")
-    # --- END DEBUG PRINT ---
 
     return df_copy
 
 def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
-    """
-    Applies ORMCR logic to the analysis data, dynamically considering selected indicators
-    and handling N/A values more gracefully for confidence score calculation.
-    """
     overall_bias = "NEUTRAL"
     confirmation_status = "PENDING"
     confirmation_reason = "Initial analysis."
