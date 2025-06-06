@@ -13,37 +13,47 @@ import numpy as np
 import time
 import traceback
 
+# Load environment variables from .env file
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
+# --- Configuration ---
 BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY')
 BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 
+# Initialize Bybit client
 if BYBIT_API_KEY and BYBIT_API_SECRET:
     bybit_client = HTTP(
         api_key=BYBIT_API_KEY,
         api_secret=BYBIT_API_SECRET,
-        testnet=False,
-        timeout=30
+        testnet=False, # Set to True for testnet
+        timeout=30 # Increased timeout to 30 seconds
     )
     print("--- Bybit client initialized ---")
 else:
     bybit_client = None
     print("--- Bybit API keys not found. Bybit client not initialized. ---")
 
+# Initialize Google Gemini
 try:
     import google.generativeai as genai
     genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+    gemini_model = genai.GenerativeModel('gemini-2.0-flash') # Using gemini-2.0-flash
     print("--- Successfully initialized model to gemini-2.0-flash at startup ---")
 except Exception as e:
     gemini_model = None
     print(f"--- Failed to initialize Gemini model: {e} ---")
 
+# --- Helper Functions ---
+
 def get_indicator_value(df, indicator_name, default_val="N/A"):
+    """
+    Helper to safely get the most recent indicator value from the DataFrame.
+    Assumes DataFrame is ordered oldest to newest (iloc[-1] is most recent).
+    """
     if indicator_name in df.columns:
         last_val = df[indicator_name].iloc[-1]
         if pd.isna(last_val):
@@ -52,9 +62,10 @@ def get_indicator_value(df, indicator_name, default_val="N/A"):
         else:
             print(f"DEBUG: get_indicator_value for {indicator_name}: Raw value found: {last_val}")
             return round(float(last_val), 2)
-    print(f"DEBUG: get_indicator_value for {indicator_name}: Column not found, returning '{default_val}'")
+    print(f"DEBUG: get_indicator_value for {indicator_name}: Column '{indicator_name}' not found after pandas_ta, returning '{default_val}'")
     return default_val
 
+# Function to fetch live market data (for dashboard)
 @app.route('/all_market_prices', methods=['GET'])
 def get_all_market_prices():
     if not bybit_client:
@@ -70,12 +81,12 @@ def get_all_market_prices():
             kline_response = bybit_client.get_kline(
                 category="spot",
                 symbol=symbol,
-                interval="D",
-                limit=1000
+                interval="D", # Daily interval for general market overview
+                limit=1000 # Max limit supported by Bybit
             )
             kline_data = kline_response.get('result', {}).get('list', [])
 
-            if kline_data and len(kline_data) >= 2:
+            if kline_data and len(kline_data) >= 2: # Need at least 2 candles for percent change
                 df = pd.DataFrame(kline_data, columns=['start', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
                 
                 # --- CRITICAL FIX: Ensure all OHLCV and volume columns are numeric ---
@@ -83,7 +94,7 @@ def get_all_market_prices():
                 for col in numeric_cols:
                     df[col] = pd.to_numeric(df[col], errors='coerce') # Convert non-numeric to NaN
                 
-                df['start'] = pd.to_numeric(df['start'])
+                df['start'] = pd.to_numeric(df['start']) # Explicitly cast to numeric to avoid FutureWarning
                 df['start'] = pd.to_datetime(df['start'], unit='ms') 
                 df.set_index('start', inplace=True)
                 df = df.iloc[::-1] # Reverse DataFrame to be OLDEST TO NEWEST
@@ -104,10 +115,20 @@ def get_all_market_prices():
                 prev_close = df['close'].iloc[-2] if len(df) > 1 else last_close
                 percent_change = ((last_close - prev_close) / prev_close) * 100 if prev_close != 0 else 0
 
-                df.ta.rsi(append=True)
-                df.ta.macd(append=True)
-                df.ta.stoch(append=True)
-                df.ta.atr(append=True)
+                # --- Apply Indicators for Dashboard ---
+                # These are explicitly calculated for the dashboard view
+                df.ta.rsi(append=True) # Adds 'RSI_14'
+                df.ta.macd(append=True) # Adds 'MACD_12_26_9', 'MACDH_12_26_9', (and ideally 'MACDS_12_26_9')
+                df.ta.stoch(append=True) # Adds 'STOCHk_14_3_3', 'STOCHd_14_3_3'
+                df.ta.atr(append=True) # Adding ATR for consistent debugging, even if not shown on dashboard initially
+                # Can add EMA, SMA, Bollinger Bands here if needed for dashboard display too.
+                # Example: df.ta.ema(length=9, append=True)
+
+                # --- NEW DEBUG PRINT: List all columns after pandas_ta ---
+                print(f"\n--- DEBUG: Dashboard {symbol} ALL COLUMNS after pandas_ta: ---")
+                print(df.columns.tolist())
+                print("------------------------------------------------------------------")
+                # --- END NEW DEBUG PRINT ---
 
                 print(f"\n--- DEBUG: Dashboard {symbol} DataFrame info after pandas_ta ---")
                 df.info(verbose=False, buf=sys.stdout)
@@ -122,23 +143,42 @@ def get_all_market_prices():
                     if tail_data.iloc[-1].isnull().any():
                         print(f"WARNING: Dashboard {symbol} Last row of selected indicators contains NaN values.")
                 else:
-                    print(f"No selected indicator columns found for dashboard {symbol} after calculation.")
+                    print(f"No selected indicator columns found for dashboard {symbol} after calculation (this means they were not created).")
                 print("------------------------------------------------------------------")
+
 
                 orscr_signal = "NEUTRAL"
                 rsi_val = get_indicator_value(df, 'RSI_14', default_val="N/A")
                 macd_val = get_indicator_value(df, 'MACD_12_26_9', default_val="N/A")
+                
+                # --- MODIFIED LOGIC FOR MACDS IN DASHBOARD ---
+                # If MACDS_12_26_9 column is NOT found (which your logs confirm),
+                # try to use MACDH_12_26_9 for the signal comparison in the dashboard.
                 macds_val = get_indicator_value(df, 'MACDS_12_26_9', default_val="N/A")
+                macd_compare_val = macds_val # Default to MACDS
+                
+                if macds_val == "N/A" and 'MACDH_12_26_9' in df.columns:
+                    # If MACDS is not found, use MACDH for comparison on the dashboard
+                    macd_compare_val = get_indicator_value(df, 'MACDH_12_26_9', default_val="N/A")
+                    print(f"DEBUG: MACDS_12_26_9 not found, using MACDH_12_26_9 ({macd_compare_val}) for dashboard ORSCR logic.")
+                elif macds_val == "N/A":
+                    print(f"DEBUG: Neither MACDS_12_26_9 nor MACDH_12_26_9 found. MACD comparison will be skipped.")
+                # --- END MODIFIED LOGIC ---
+
                 stoch_k_val = get_indicator_value(df, 'STOCHk_14_3_3', default_val="N/A")
                 
-                # Condition for dashboard signal: all three must be numeric for a BUY/SELL signal
-                if isinstance(rsi_val, (int, float)) and isinstance(macd_val, (int, float)) and isinstance(macds_val, (int, float)):
-                    if rsi_val > 60 and macd_val > macds_val:
+                # Check if indicators are numeric before applying ORSCR logic for dashboard signal
+                # Now using macd_compare_val for the MACD condition
+                if isinstance(rsi_val, (int, float)) and isinstance(macd_val, (int, float)) and isinstance(macd_compare_val, (int, float)):
+                    # For MACD, use MACDH for signal if MACDS is not available.
+                    # Positive MACDH suggests bullish momentum, negative suggests bearish.
+                    if rsi_val > 60 and (macd_val > macd_compare_val if 'MACDS_12_26_9' in df.columns else macd_compare_val > 0):
                         orscr_signal = "BUY"
-                    elif rsi_val < 40 and macd_val < macds_val:
+                    elif rsi_val < 40 and (macd_val < macd_compare_val if 'MACDS_12_26_9' in df.columns else macd_compare_val < 0):
                         orscr_signal = "SELL"
                 else:
                     orscr_signal = "N/A (Indicators not available for ORSCR logic)"
+
 
                 market_data[symbol] = {
                     "price": round(float(last_close), 2),
@@ -169,6 +209,7 @@ def get_all_market_prices():
 
     return jsonify(market_data)
 
+# --- Chat Endpoint (Existing) ---
 @app.route('/chat', methods=['POST'])
 def chat():
     if not gemini_model:
@@ -178,11 +219,14 @@ def chat():
     if not user_message:
         return jsonify({"error": "No message provided"}), 400
 
+    # Fetch live market data for context
     market_data_response = get_all_market_prices()
     market_data = market_data_response.json
 
+    # Fetch mock trade history for context
     trade_history = get_trades().json
 
+    # Construct context for Gemini
     context = f"""
     You are Aura, an AI trading assistant. Your goal is to provide insightful, helpful, and **friendly** responses to the user's trading-related questions.
     Adopt a **conversational, approachable, and encouraging tone**. Avoid overly formal or robotic language.
@@ -206,6 +250,7 @@ def chat():
         traceback.print_exc()
         return jsonify({"error": f"Failed to get AI response: {e}"}), 500
 
+# --- Trade Log Endpoints (Existing - using local JSON file) ---
 TRADE_LOG_FILE = 'trades.json'
 
 def load_trades():
@@ -239,17 +284,21 @@ def get_trades():
     trades = load_trades()
     return jsonify(trades)
 
+# --- ORMCR Analysis Endpoint ---
+
+# Mapping for Bybit interval strings and data limits
 BYBIT_INTERVAL_MAP = {
-    "M1": {"interval": "1", "limit": 1000},
-    "M5": {"interval": "5", "limit": 1000},
-    "M15": {"interval": "15", "limit": 1000},
-    "M30": {"interval": "30", "limit": 1000},
-    "H1": {"interval": "60", "limit": 1000},
-    "H4": {"interval": "240", "limit": 1000},
-    "D1": {"interval": "D", "limit": 1000},
+    "M1": {"interval": "1", "limit": 1000}, # Max limit supported by Bybit
+    "M5": {"interval": "5", "limit": 1000}, # Max limit supported by Bybit
+    "M15": {"interval": "15", "limit": 1000}, # Max limit supported by Bybit
+    "M30": {"interval": "30", "limit": 1000}, # Max limit supported by Bybit
+    "H1": {"interval": "60", "limit": 1000}, # Max limit supported by Bybit
+    "H4": {"interval": "240", "limit": 1000}, # Max limit supported by Bybit
+    "D1": {"interval": "D", "limit": 1000}, # Max limit supported by Bybit
 }
 
 def fetch_real_ohlcv(symbol, interval_key):
+    """Fetches real OHLCV data from Bybit for a given symbol and interval."""
     if not bybit_client:
         print("Bybit client not initialized. Cannot fetch real data.")
         return pd.DataFrame()
@@ -299,12 +348,13 @@ def fetch_real_ohlcv(symbol, interval_key):
 
 
 def calculate_indicators_for_df(df, indicators):
+    """Calculates selected indicators for a DataFrame."""
     df_copy = df.copy()
     
     if "RSI" in indicators:
         df_copy.ta.rsi(append=True)
     if "MACD" in indicators:
-        df_copy.ta.macd(append=True)
+        df_copy.ta.macd(append=True) # This will create MACD_12_26_9 and MACDH_12_26_9 (and ideally MACDS_12_26_9)
     if "Moving Averages" in indicators:
         df_copy.ta.ema(length=9, append=True)
         df_copy.ta.sma(length=20, append=True)
@@ -318,6 +368,12 @@ def calculate_indicators_for_df(df, indicators):
     if "ATR" in indicators:
         df_copy.ta.atr(append=True)
 
+    # --- NEW DEBUG PRINT: List all columns after pandas_ta ---
+    print(f"\n--- DEBUG: ORMCR Analysis ALL COLUMNS after pandas_ta: ---")
+    print(df_copy.columns.tolist())
+    print("------------------------------------------------------------------")
+    # --- END NEW DEBUG PRINT ---
+
     print(f"\n--- DEBUG: ORMCR Analysis DataFrame info after pandas_ta for columns: {df_copy.columns.tolist()} ---")
     df_copy.info(verbose=False, buf=sys.stdout)
     print("------------------------------------------------------------------")
@@ -328,15 +384,19 @@ def calculate_indicators_for_df(df, indicators):
     if existing_cols:
         tail_data = df_copy[existing_cols].tail(20)
         print(tail_data)
-        if tail_data.iloc[-1].isnull().any():
+        if tail_data.iloc[-1].isnull().any().any(): # Check if any selected indicator in the last row is NaN
             print("WARNING: ORMCR Analysis Last row of selected indicators contains NaN values.")
     else:
-        print("No selected indicator columns found in ORMCR Analysis DataFrame after calculation.")
+        print("No selected indicator columns found in ORMCR Analysis DataFrame after calculation (this means they were not created).")
     print("------------------------------------------------------------------")
 
     return df_copy
 
 def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
+    """
+    Applies ORMCR logic to the analysis data, dynamically considering selected indicators
+    and handling N/A values more gracefully for confidence score calculation.
+    """
     overall_bias = "NEUTRAL"
     confirmation_status = "PENDING"
     confirmation_reason = "Initial analysis."
@@ -407,7 +467,7 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
         ema9_lowest = get_indicator_value(df_lowest, 'EMA_9')
         rsi_lowest = get_indicator_value(df_lowest, 'RSI_14')
         macd_lowest = get_indicator_value(df_lowest, 'MACD_12_26_9')
-        macds_lowest = get_indicator_value(df_lowest, 'MACDS_12_26_9')
+        macds_lowest = get_indicator_value(df_lowest, 'MACDS_12_26_9') # This will be 'N/A' as column not found
         stoch_k_lowest = get_indicator_value(df_lowest, 'STOCHk_14_3_3')
         stoch_d_lowest = get_indicator_value(df_lowest, 'STOCHd_14_3_3')
         atr_lowest = get_indicator_value(df_lowest, 'ATR_14')
@@ -470,29 +530,29 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
 
         # Condition 4: MACD Crossover / Momentum - only if MACD is selected
         if "MACD" in selected_indicators_from_frontend and isinstance(macd_lowest, (int, float)):
-            if isinstance(macds_lowest, (int, float)):
+            if isinstance(macds_lowest, (int, float)): # Prefer MACD signal line for crossover
                 if overall_bias == "BULLISH" and macd_lowest > macds_lowest:
                     conditions.append(True)
-                    confirmation_details.append("MACD shows bullish crossover.")
+                    confirmation_details.append("MACD shows bullish crossover (MACD > MACDS).")
                 elif overall_bias == "BEARISH" and macd_lowest < macds_lowest:
                     conditions.append(True)
-                    confirmation_details.append("MACD shows bearish crossover.")
+                    confirmation_details.append("MACD shows bearish crossover (MACD < MACDS).")
                 else:
                     conditions.append(False)
                     confirmation_details.append("MACD is not confirming direction (crossover).")
-            elif isinstance(macd_hist, (int, float)): 
-                if overall_bias == "BULLISH" and macd_lowest > 0 and macd_hist > 0:
+            elif 'MACDH_12_26_9' in df_lowest.columns and isinstance(macd_hist, (int, float)): # Fallback to MACD Histogram if MACDS is not found or is N/A
+                if overall_bias == "BULLISH" and macd_hist > 0:
                     conditions.append(True)
-                    confirmation_details.append("MACD positive with bullish histogram (MACDS N/A).")
-                elif overall_bias == "BEARISH" and macd_lowest < 0 and macd_hist < 0:
+                    confirmation_details.append("MACD histogram is bullish (>0, MACDS not available).")
+                elif overall_bias == "BEARISH" and macd_hist < 0:
                     conditions.append(True)
-                    confirmation_details.append("MACD negative with bearish histogram (MACDS N/A).")
+                    confirmation_details.append("MACD histogram is bearish (<0, MACDS not available).")
                 else:
                     conditions.append(False)
-                    confirmation_details.append("MACD not confirming direction (histogram).")
+                    confirmation_details.append("MACD histogram is neutral (MACDS not available).")
             else:
                 conditions.append(False)
-                confirmation_details.append("MACD indicator data missing.")
+                confirmation_details.append("MACD indicator data missing for crossover/histogram check.")
         elif "MACD" in selected_indicators_from_frontend:
             conditions.append(False)
             confirmation_details.append("MACD indicator data missing.")
@@ -516,7 +576,7 @@ def apply_ormcr_logic(analysis_data, selected_indicators_from_frontend):
         if total_relevant_conditions > 0:
             calculated_confidence_score = int((met_conditions_count / total_relevant_conditions) * 100)
         else:
-            calculated_confidence_score = 50
+            calculated_confidence_score = 50 # Default if no relevant conditions were checked
             confirmation_details.append("No relevant ORMCR indicators available or selected for confirmation.")
 
         if calculated_confidence_score < 40:
@@ -662,7 +722,7 @@ def run_ormcr_analysis():
     for tf, data in analysis_data_by_tf.items():
         indicators_snapshot_dict = {}
         indicator_cols = [
-            'RSI_14', 'MACD_12_26_9', 'MACDH_12_26_9', 'MACDS_12_26_9',
+            'RSI_14', 'MACD_12_26_9', 'MACDH_12_26_9', 'MACDS_12_26_9', # Keep MACDS for snapshot if it ever appears
             'EMA_9', 'SMA_20', 'EMA_50',
             'BBL_5_2.0', 'BBM_5_2.0', 'BBU_5_2.0',
             'STOCHk_14_3_3', 'STOCHd_14_3_3',
